@@ -6,15 +6,40 @@
 
   const screens = ["join", "lobby", "role", "game", "vote", "result", "controls"];
   let screenBeforeControls = "join";
+
   function showScreen(name) {
-    screens.forEach((s) => $("screen-" + s).classList.toggle("active", s === name));
+    screens.forEach((s) => {
+      const el = $("screen-" + s);
+      if (el) el.classList.toggle("active", s === name);
+    });
   }
 
-  $("btn-open-controls").onclick = () => {
-    screenBeforeControls = screens.find((s) => $("screen-" + s).classList.contains("active")) || "join";
+  function openControls() {
+    const currentActive = screens.find((s) => {
+      const el = $("screen-" + s);
+      return el && el.classList.contains("active");
+    });
+    if (currentActive && currentActive !== "controls") {
+      screenBeforeControls = currentActive;
+    }
+    const img = $("controls-image") || $("img-controls");
+    if (img) img.src = ASSET.controls;
     showScreen("controls");
-  };
-  $("btn-close-controls").onclick = () => showScreen(screenBeforeControls);
+  }
+
+  document.addEventListener("click", (e) => {
+    const target = e.target.closest("#btn-open-controls, .btn-open-controls");
+    if (target) {
+      openControls();
+    }
+  });
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const btnClose = $("btn-close-controls");
+    if (btnClose) {
+      btnClose.onclick = () => showScreen(screenBeforeControls);
+    }
+  });
 
   const AVATARS = ["1", "2", "3", "4", "5", "6", "7", "8"];
   const charSrc = (id) => `/static/assets/${id}.png`;
@@ -24,6 +49,7 @@
     diamond: "/static/assets/diamond.png",
     roleInnocent: "/static/assets/9.png",   // свиток "мирный"
     roleThief: "/static/assets/10.png",     // свиток "вор"
+    controls: "/static/assets/11.png",      // подсказка по управлению
   };
 
   // ---------------------------------------------------------
@@ -55,12 +81,9 @@
   let selectedAvatar = AVATARS[0];
   let iAmThief = false;
   let roomCode = "";
-  let desiredPlayers = 3;      // выбор при создании комнаты
-  let roomMaxPlayers = 3;      // фактический размер комнаты (приходит с сервера)
-  let latestLobbyPlayers = []; // для перерисовки пикера аватарок при live-обновлениях
 
   // Статические данные уровней (маза/сундуки/алмазы), приходят один раз при старте игры
-  let world = { tile: 40, grid_w: 19, grid_h: 19, num_levels: 3, steal_range: 72 };
+  let world = { tile: 40, grid_w: 19, grid_h: 19, num_levels: 3 };
   let levels = [];      // [{maze, exit_x, chests:[{id,x,y}], diamond_piles:[{id,x,y,count}]}]
   let myLevel = 0;
 
@@ -95,27 +118,10 @@
   }
   $("input-name").value = randomName();
 
-  function buildPlayersCountPicker() {
-    const wrap = $("players-count-picker");
-    wrap.innerHTML = "";
-    for (let n = 3; n <= 8; n++) {
-      const cell = document.createElement("div");
-      cell.className = "count-cell" + (n === desiredPlayers ? " selected" : "");
-      cell.textContent = n;
-      cell.onclick = () => {
-        desiredPlayers = n;
-        [...wrap.children].forEach((c) => c.classList.remove("selected"));
-        cell.classList.add("selected");
-      };
-      wrap.appendChild(cell);
-    }
-  }
-  buildPlayersCountPicker();
-
   $("btn-create").onclick = async () => {
     $("join-error").textContent = "";
     try {
-      const res = await fetch(`/api/new_room?players=${desiredPlayers}`);
+      const res = await fetch("/api/new_room");
       const data = await res.json();
       $("input-room").value = data.room;
       connect(data.room);
@@ -169,8 +175,6 @@
       case "joined":
         myId = msg.you;
         isHost = msg.host;
-        selectedAvatar = msg.avatar || selectedAvatar;
-        roomMaxPlayers = msg.max_players || roomMaxPlayers;
         $("lobby-room-code").textContent = roomCode;
         buildAvatarPicker();
         showScreen("lobby");
@@ -197,7 +201,7 @@
         showVoteScreen();
         break;
       case "vote_progress":
-        $("vote-status").textContent = `Проголосовали: ${msg.voted.length}/${roomMaxPlayers}`;
+        $("vote-status").textContent = `Проголосовали: ${msg.voted.length}/3`;
         break;
       case "player_left":
         if (players[msg.id]) players[msg.id].connected = false;
@@ -216,50 +220,23 @@
     wrap.innerHTML = "";
     AVATARS.forEach((id) => {
       const cell = document.createElement("div");
-      cell.className = "avatar-cell";
-      cell.dataset.avatarId = id;
+      cell.className = "avatar-cell" + (id === selectedAvatar ? " selected" : "");
       const img = document.createElement("img");
       img.src = charSrc(id);
       img.alt = "avatar " + id;
       cell.appendChild(img);
       cell.onclick = () => {
-        if (cell.classList.contains("taken")) return;
         selectedAvatar = id;
+        [...wrap.children].forEach((c) => c.classList.remove("selected"));
+        cell.classList.add("selected");
         send({ type: "set_avatar", avatar: id });
-        refreshAvatarPicker();
       };
       wrap.appendChild(cell);
     });
-    refreshAvatarPicker();
-  }
-
-  // Перекрашивает пикер по последнему известному списку игроков в комнате —
-  // вызывается и сразу после создания, и при каждом lobby_state (когда кто-то
-  // другой меняет аватар, чтобы занятость обновлялась у всех живьём).
-  function refreshAvatarPicker() {
-    const wrap = $("avatar-picker");
-    if (!wrap) return;
-    const takenByOthers = new Set(
-      latestLobbyPlayers.filter((p) => p.id !== myId).map((p) => p.avatar)
-    );
-    [...wrap.children].forEach((cell) => {
-      const id = cell.dataset.avatarId;
-      const taken = takenByOthers.has(id) && id !== selectedAvatar;
-      cell.classList.toggle("taken", taken);
-      cell.classList.toggle("selected", id === selectedAvatar);
-    });
-    $("avatar-hint").textContent = "Серые персонажи уже заняты другими игроками.";
   }
 
   function renderLobby(msg) {
     isHost = msg.host === myId;
-    roomMaxPlayers = msg.max_players || roomMaxPlayers;
-    latestLobbyPlayers = msg.players;
-
-    const mine = msg.players.find((p) => p.id === myId);
-    if (mine) selectedAvatar = mine.avatar;
-    refreshAvatarPicker();
-
     const list = $("lobby-players");
     list.innerHTML = "";
     msg.players.forEach((p) => {
@@ -269,21 +246,12 @@
         (msg.host === p.id ? `<span class="tag">хост</span>` : "");
       list.appendChild(row);
     });
-    const need = roomMaxPlayers;
-    const ready = msg.players.length === need;
+    const ready = msg.players.length === 3;
     $("btn-start").disabled = !(ready && isHost);
     $("btn-start").classList.toggle("hidden", !isHost);
-    $("lobby-need").textContent = `Нужно ${need} ${pluralPlayers(need)}, чтобы начать.`;
     $("lobby-hint").textContent = ready
       ? (isHost ? "Все в сборе — можно начинать!" : "Ждём, пока хост начнёт игру…")
-      : `Ждём игроков: ${msg.players.length}/${need}`;
-  }
-
-  function pluralPlayers(n) {
-    const mod10 = n % 10, mod100 = n % 100;
-    if (mod10 === 1 && mod100 !== 11) return "игрок";
-    if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return "игрока";
-    return "игроков";
+      : `Ждём игроков: ${msg.players.length}/3`;
   }
 
   $("btn-start").onclick = () => send({ type: "start_game" });
@@ -401,11 +369,7 @@
       setTimeout(() => el.remove(), 1100);
     }
 
-    // Всплывающие "+X/-X" от кражи выдают, кто на кого напал, поэтому их
-    // показываем только клиенту вора (это чисто локальная проверка iAmThief,
-    // по сети никому больше не видно). Сундуки — общая радость, их видно всем.
     if (ev.type === "steal") {
-      if (!iAmThief) return;
       makeFloater(ev.target, `-${ev.amount}💎`, "#ff6767");
       makeFloater(ev.thief, `+${ev.amount}💎`, "#00d68f");
     } else if (ev.type === "chest") {
@@ -487,29 +451,18 @@
       }
     });
 
-    // Кольцо дальности кражи — видит ТОЛЬКО вор, и только вокруг себя.
-    // Это чисто локальный рендер: роль (iAmThief) известна лишь этому
-    // клиенту из приватного сообщения game_start, по сети другим не уходит.
-    if (iAmThief && players[myId] && players[myId].level === myLevel) {
-      const me = players[myId];
-      const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
-      const centerX = me.x * scale + hitboxSize / 2, centerY = me.y * scale + hitboxSize / 2;
-      const rangePx = (world.steal_range || 72) * scale;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, rangePx, 0, Math.PI * 2);
-      ctx.setLineDash([6, 6]);
-      ctx.strokeStyle = "rgba(255,103,103,0.55)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
     // игроки на этом же этаже
     Object.values(players).forEach((p) => {
       if (p.level !== myLevel || !p.connected) return;
       const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
       const px = p.x * scale, py = p.y * scale;
       const centerX = px + hitboxSize / 2, centerY = py + hitboxSize / 2;
+
+      // мягкое пятно под ногами, чтобы отличать себя от других
+      ctx.beginPath();
+      ctx.arc(centerX, centerY + hitboxSize * 0.25, hitboxSize / 2 + 3, 0, Math.PI * 2);
+      ctx.fillStyle = p.id === myId ? "rgba(0,214,143,0.35)" : "rgba(255,255,255,0.15)";
+      ctx.fill();
 
       const img = charImg[p.avatar];
       if (img && img.complete && img.naturalWidth > 0) {
@@ -548,7 +501,7 @@
   }
 
   const GAME_KEYS = new Set(["w", "a", "s", "d", "W", "A", "S", "D",
-    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Enter"]);
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "f", "F"]);
   window.addEventListener("keydown", (e) => {
     if (GAME_KEYS.has(e.key) && $("screen-game").classList.contains("active")) e.preventDefault();
     handleKey(e.key, true);
@@ -570,7 +523,7 @@
     if (key === " ") {
       e_action(down);
     }
-    if (key === "Enter" && down) {
+    if ((key === "f" || key === "F") && down) {
       send({ type: "steal" });
     }
   }
