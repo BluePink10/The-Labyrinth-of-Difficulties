@@ -2,49 +2,12 @@
 // Thief & Innocents — клиентский скрипт
 // ============================================================
 (() => {
-  // Главная функция инициализации — запустится только когда HTML полностью загружен
   const initGame = () => {
     const $ = (id) => document.getElementById(id);
 
     // Список всех экранов игры
     const screens = ["join", "lobby", "role", "game", "vote", "result", "controls"];
     let screenBeforeControls = "join";
-
-    // Переключение активного экрана
-    function showScreen(name) {
-      screens.forEach((s) => {
-        const el = $("screen-" + s);
-        if (el) el.classList.toggle("active", s === name);
-      });
-    }
-
-    // Открытие экрана управления
-    function openControlsScreen() {
-      const active = screens.find((s) => $("screen-" + s) && $("screen-" + s).classList.contains("active"));
-      if (active && active !== "controls") {
-        screenBeforeControls = active;
-      }
-      updateControlsHintImage();
-      showScreen("controls");
-    }
-
-    // Подгрузка и обновление картинки управления (11.png)
-    function updateControlsHintImage() {
-      const hintImg = $("img-controls-hint") || $("controls-image") || $("controls-img");
-      if (hintImg && ASSET.hint) {
-        hintImg.src = ASSET.hint;
-      }
-    }
-
-    // Привязка кнопок вызова и закрытия управления
-    const btnOpenControls = $("btn-open-controls");
-    if (btnOpenControls) btnOpenControls.onclick = openControlsScreen;
-
-    const btnOpenControlsGame = $("btn-open-controls-game") || $("btn-hint");
-    if (btnOpenControlsGame) btnOpenControlsGame.onclick = openControlsScreen;
-
-    const btnCloseControls = $("btn-close-controls");
-    if (btnCloseControls) btnCloseControls.onclick = () => showScreen(screenBeforeControls);
 
     // ---------------------------------------------------------
     // Константы и Ассеты
@@ -55,19 +18,137 @@
       stone: "/static/assets/stone.png",
       chest: "/static/assets/chest.png",
       diamond: "/static/assets/diamond.png",
-      roleInnocent: "/static/assets/9.png",   // свиток "мирный"
-      roleThief: "/static/assets/10.png",     // свиток "вор"
-      hint: "/static/assets/11.png",          // картинка управления
+      roleInnocent: "/static/assets/9.png",   
+      roleThief: "/static/assets/10.png",     
+      hint: "/static/assets/11.png",          // Картинка управления
     };
 
-    const charImg = {};       // Кэш для персонажей: id -> Image
-    const imgReady = {};      // Кэш для остальных ассетов: key -> Image
+    // ---------------------------------------------------------
+    // Генерация интерфейса управления (если его нет в HTML)
+    // ---------------------------------------------------------
+    function injectControlsUI() {
+      // 1. Создаем всплывающее окно управления с 11.png
+      let sc = $("screen-controls");
+      if (!sc) {
+        sc = document.createElement("div");
+        sc.id = "screen-controls";
+        sc.className = "screen";
+        sc.dataset.injected = "true"; // пометка для скрипта
+        sc.style.display = "none";
+        sc.style.position = "fixed";
+        sc.style.top = "0"; sc.style.left = "0"; sc.style.width = "100%"; sc.style.height = "100%";
+        sc.style.background = "rgba(0,0,0,0.92)";
+        sc.style.zIndex = "9999";
+        sc.style.flexDirection = "column";
+        sc.style.alignItems = "center";
+        sc.style.justifyContent = "center";
+
+        sc.innerHTML = `
+          <h2 style="color:#00d68f; margin-bottom: 20px; font-family: sans-serif; text-transform: uppercase; letter-spacing: 2px;">Как играть</h2>
+          <img id="img-controls-hint" src="${ASSET.hint}" alt="Управление" style="max-width: 95%; max-height: 70vh; border-radius: 12px; margin-bottom: 25px; box-shadow: 0 5px 25px rgba(0,0,0,0.8);">
+          <button id="btn-close-controls-injected" style="padding: 12px 35px; font-size: 18px; border-radius: 10px; border: none; background: #ff6767; color: white; cursor: pointer; font-weight: bold; text-transform: uppercase; box-shadow: 0 4px 10px rgba(255,103,103,0.3);">Вернуться в игру</button>
+        `;
+        document.body.appendChild(sc);
+
+        $("btn-close-controls-injected").onclick = () => showScreen(screenBeforeControls);
+      } else {
+        // Если экран был в HTML, но без картинки
+        const existingImg = $("img-controls-hint") || $("controls-image") || $("controls-img");
+        if (!existingImg) {
+          const img = document.createElement("img");
+          img.id = "img-controls-hint";
+          img.src = ASSET.hint;
+          img.style.maxWidth = "100%";
+          img.style.maxHeight = "70vh";
+          img.style.borderRadius = "10px";
+          sc.insertBefore(img, sc.firstChild);
+        }
+      }
+
+      // 2. Создаем кнопку "Управление" в игровом интерфейсе
+      const gameWrap = $("game-wrap") || $("screen-game");
+      if (gameWrap && !$("btn-open-controls-game")) {
+        const btn = document.createElement("button");
+        btn.id = "btn-open-controls-game";
+        btn.innerHTML = "🎮 Управление";
+        btn.style.position = "absolute";
+        btn.style.top = "15px";
+        btn.style.right = "15px";
+        btn.style.zIndex = "1000";
+        btn.style.padding = "10px 15px";
+        btn.style.background = "rgba(20, 20, 25, 0.85)";
+        btn.style.color = "#00d68f";
+        btn.style.border = "2px solid #00d68f";
+        btn.style.borderRadius = "10px";
+        btn.style.cursor = "pointer";
+        btn.style.fontWeight = "bold";
+        btn.style.fontSize = "14px";
+        btn.style.boxShadow = "0 4px 12px rgba(0,0,0,0.4)";
+        btn.style.transition = "transform 0.2s, background 0.2s";
+
+        btn.onmouseenter = () => btn.style.background = "rgba(0, 214, 143, 0.2)";
+        btn.onmouseleave = () => btn.style.background = "rgba(20, 20, 25, 0.85)";
+
+        btn.onclick = openControlsScreen;
+        gameWrap.appendChild(btn);
+      }
+    }
+
+    // Запускаем инъекцию UI
+    injectControlsUI();
+
+    // ---------------------------------------------------------
+    // Переключение экранов
+    // ---------------------------------------------------------
+    function showScreen(name) {
+      screens.forEach((s) => {
+        const el = $("screen-" + s);
+        if (el) {
+          const isActive = (s === name);
+          el.classList.toggle("active", isActive);
+          if (el.dataset.injected) {
+            el.style.display = isActive ? "flex" : "none";
+          }
+        }
+      });
+    }
+
+    function openControlsScreen() {
+      const active = screens.find((s) => {
+        const el = $("screen-" + s);
+        return el && (el.classList.contains("active") || (el.dataset.injected && el.style.display === "flex"));
+      });
+      if (active && active !== "controls") {
+        screenBeforeControls = active;
+      }
+      updateControlsHintImage();
+      showScreen("controls");
+    }
+
+    function updateControlsHintImage() {
+      const hintImg = $("img-controls-hint") || $("controls-image") || $("controls-img");
+      if (hintImg && ASSET.hint) {
+        hintImg.src = ASSET.hint;
+      }
+    }
+
+    const btnOpenControls = $("btn-open-controls");
+    if (btnOpenControls) btnOpenControls.onclick = openControlsScreen;
+
+    const btnCloseControls = $("btn-close-controls");
+    if (btnCloseControls) btnCloseControls.onclick = () => showScreen(screenBeforeControls);
+
+    // ---------------------------------------------------------
+    // Загрузка Ассетов
+    // ---------------------------------------------------------
+    const charImg = {};       
+    const imgReady = {};      
 
     function loadImage(src) {
       return new Promise((resolve) => {
         const img = new Image();
         img.onload = () => resolve(img);
-        img.onerror = () => resolve(img); // не блокируем загрузку при ошибке
+        img.onerror = () => resolve(img);
         img.src = src;
       });
     }
@@ -144,7 +225,7 @@
         wrap.appendChild(cell);
       }
     }
-    buildPlayersCountPicker(); // Запускаем сборку переключателя игроков
+    buildPlayersCountPicker();
 
     if ($("btn-create")) {
       $("btn-create").onclick = async () => {
@@ -467,7 +548,6 @@
       const stoneImg = imgReady.stone;
       const stoneOk = stoneImg && stoneImg.complete && stoneImg.naturalWidth > 0;
 
-      // Сетка карты и стены
       for (let y = 0; y < world.grid_h; y++) {
         for (let x = 0; x < world.grid_w; x++) {
           const px = x * tileSize, py = y * tileSize;
@@ -487,7 +567,6 @@
         }
       }
 
-      // Алмазы
       const piles = pilesState[myLevel] || [];
       const pileMap = {}; piles.forEach((d) => (pileMap[d.id] = d));
       const diamondImg = imgReady.diamond;
@@ -507,7 +586,6 @@
         });
       });
 
-      // Сундуки
       const chests = chestsState[myLevel] || [];
       const chestMap = {}; chests.forEach((c) => (chestMap[c.id] = c));
       const chestImg = imgReady.chest;
@@ -532,7 +610,6 @@
         }
       });
 
-      // Радиус кражи для вора
       if (iAmThief && players[myId] && players[myId].level === myLevel) {
         const me = players[myId];
         const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
@@ -547,7 +624,6 @@
         ctx.setLineDash([]);
       }
 
-      // Игроки
       Object.values(players).forEach((p) => {
         if (p.level !== myLevel || !p.connected) return;
         const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
@@ -689,7 +765,6 @@
     window.addEventListener("mousemove", (e) => { if (joyActive && joyId === "mouse") joyMove(e.clientX, e.clientY); });
     window.addEventListener("mouseup", () => { if (joyId === "mouse") joyEnd(); });
 
-    // Кнопка взаимодействия с сундуками
     const btnAction = $("btn-action");
     if (btnAction) {
       ["touchstart", "mousedown"].forEach((ev) =>
@@ -700,7 +775,6 @@
       );
     }
 
-    // Кнопка кражи
     const btnSteal = $("btn-steal");
     if (btnSteal) {
       btnSteal.addEventListener("touchstart", (e) => {
@@ -773,14 +847,12 @@
     }
 
     if ($("btn-again")) $("btn-again").onclick = () => location.reload();
-  }; // Конец функции initGame
+  };
 
-  // Проверяем, загрузилась ли уже страница
+  // Проверка готовности документа
   if (document.readyState === "loading") {
-    // Если еще загружается — ждём события DOMContentLoaded
     document.addEventListener("DOMContentLoaded", initGame);
   } else {
-    // Если страница уже загружена — запускаем немедленно
     initGame();
   }
 })();
