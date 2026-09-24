@@ -24,48 +24,47 @@
     };
 
     // ---------------------------------------------------------
-    // Генерация интерфейса управления (если его нет в HTML)
+    // Полное очищение и сборка экрана управления (только картинка 11.png)
     // ---------------------------------------------------------
     function injectControlsUI() {
-      // 1. Создаем всплывающее окно управления с 11.png
       let sc = $("screen-controls");
       if (!sc) {
         sc = document.createElement("div");
         sc.id = "screen-controls";
         sc.className = "screen";
-        sc.dataset.injected = "true"; // пометка для скрипта
-        sc.style.display = "none";
-        sc.style.position = "fixed";
-        sc.style.top = "0"; sc.style.left = "0"; sc.style.width = "100%"; sc.style.height = "100%";
-        sc.style.background = "rgba(0,0,0,0.92)";
-        sc.style.zIndex = "9999";
-        sc.style.flexDirection = "column";
-        sc.style.alignItems = "center";
-        sc.style.justifyContent = "center";
-
-        sc.innerHTML = `
-          <h2 style="color:#00d68f; margin-bottom: 20px; font-family: sans-serif; text-transform: uppercase; letter-spacing: 2px;">Как играть</h2>
-          <img id="img-controls-hint" src="${ASSET.hint}" alt="Управление" style="max-width: 95%; max-height: 70vh; border-radius: 12px; margin-bottom: 25px; box-shadow: 0 5px 25px rgba(0,0,0,0.8);">
-          <button id="btn-close-controls-injected" style="padding: 12px 35px; font-size: 18px; border-radius: 10px; border: none; background: #ff6767; color: white; cursor: pointer; font-weight: bold; text-transform: uppercase; box-shadow: 0 4px 10px rgba(255,103,103,0.3);">Вернуться в игру</button>
-        `;
         document.body.appendChild(sc);
-
-        $("btn-close-controls-injected").onclick = () => showScreen(screenBeforeControls);
-      } else {
-        // Если экран был в HTML, но без картинки
-        const existingImg = $("img-controls-hint") || $("controls-image") || $("controls-img");
-        if (!existingImg) {
-          const img = document.createElement("img");
-          img.id = "img-controls-hint";
-          img.src = ASSET.hint;
-          img.style.maxWidth = "100%";
-          img.style.maxHeight = "70vh";
-          img.style.borderRadius = "10px";
-          sc.insertBefore(img, sc.firstChild);
-        }
       }
 
-      // 2. Создаем кнопку "Управление" в игровом интерфейсе
+      // Перезаписываем стили экрана управления для полного перекрытия
+      sc.dataset.injected = "true";
+      sc.style.display = "none";
+      sc.style.position = "fixed";
+      sc.style.top = "0"; 
+      sc.style.left = "0"; 
+      sc.style.width = "100%"; 
+      sc.style.height = "100%";
+      sc.style.background = "rgba(10, 10, 15, 0.95)";
+      sc.style.zIndex = "9999";
+      sc.style.flexDirection = "column";
+      sc.style.alignItems = "center";
+      sc.style.justifyContent = "center";
+      sc.style.padding = "20px";
+      sc.style.boxSizing = "border-box";
+
+      // Полностью очищаем старый HTML и оставляем ТОЛЬКО картинку и кнопку
+      sc.innerHTML = `
+        <div style="position: relative; max-width: 95%; max-height: 90vh; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+          <img id="img-controls-hint" src="${ASSET.hint}" alt="Управление" style="max-width: 100%; max-height: 78vh; border-radius: 12px; object-fit: contain; box-shadow: 0 8px 30px rgba(0,0,0,0.8);">
+          <button id="btn-close-controls-injected" style="margin-top: 20px; padding: 12px 35px; font-size: 16px; border-radius: 10px; border: none; background: #ff6767; color: white; cursor: pointer; font-weight: bold; text-transform: uppercase; box-shadow: 0 4px 15px rgba(255,103,103,0.4);">Вернуться</button>
+        </div>
+      `;
+
+      const closeBtn = $("btn-close-controls-injected");
+      if (closeBtn) {
+        closeBtn.onclick = () => showScreen(screenBeforeControls);
+      }
+
+      // Создаем кнопкy "Управление" поверх игрового экрана
       const gameWrap = $("game-wrap") || $("screen-game");
       if (gameWrap && !$("btn-open-controls-game")) {
         const btn = document.createElement("button");
@@ -94,7 +93,7 @@
       }
     }
 
-    // Запускаем инъекцию UI
+    // Запускаем сборку интерфейса
     injectControlsUI();
 
     // ---------------------------------------------------------
@@ -106,7 +105,7 @@
         if (el) {
           const isActive = (s === name);
           el.classList.toggle("active", isActive);
-          if (el.dataset.injected) {
+          if (el.dataset.injected || s === "controls") {
             el.style.display = isActive ? "flex" : "none";
           }
         }
@@ -116,7 +115,7 @@
     function openControlsScreen() {
       const active = screens.find((s) => {
         const el = $("screen-" + s);
-        return el && (el.classList.contains("active") || (el.dataset.injected && el.style.display === "flex"));
+        return el && (el.classList.contains("active") || (el.style.display === "flex" && s !== "controls"));
       });
       if (active && active !== "controls") {
         screenBeforeControls = active;
@@ -126,7 +125,7 @@
     }
 
     function updateControlsHintImage() {
-      const hintImg = $("img-controls-hint") || $("controls-image") || $("controls-img");
+      const hintImg = $("img-controls-hint");
       if (hintImg && ASSET.hint) {
         hintImg.src = ASSET.hint;
       }
