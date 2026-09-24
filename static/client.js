@@ -1,12 +1,14 @@
 // ============================================================
-// Thief & Innocents — клиент
+// Thief & Innocents — клиентский скрипт
 // ============================================================
 (() => {
   const $ = (id) => document.getElementById(id);
 
+  // Список всех экранов игры
   const screens = ["join", "lobby", "role", "game", "vote", "result", "controls"];
   let screenBeforeControls = "join";
 
+  // Переключение активного экрана
   function showScreen(name) {
     screens.forEach((s) => {
       const el = $("screen-" + s);
@@ -14,6 +16,7 @@
     });
   }
 
+  // Открытие экрана управления
   function openControlsScreen() {
     const active = screens.find((s) => $("screen-" + s) && $("screen-" + s).classList.contains("active"));
     if (active && active !== "controls") {
@@ -23,6 +26,7 @@
     showScreen("controls");
   }
 
+  // Подгрузка и обновление картинки управления (11.png)
   function updateControlsHintImage() {
     const hintImg = $("img-controls-hint") || $("controls-image") || $("controls-img");
     if (hintImg && ASSET.hint) {
@@ -30,15 +34,19 @@
     }
   }
 
+  // Привязка кнопок вызова и закрытия управления
   const btnOpenControls = $("btn-open-controls");
   if (btnOpenControls) btnOpenControls.onclick = openControlsScreen;
 
-  const btnOpenControlsGame = $("btn-open-controls-game") || $("btn-hint");
+  const btnOpenControlsGame = $("btn-open-controls-game") \vert{}\vert{} $("btn-hint");
   if (btnOpenControlsGame) btnOpenControlsGame.onclick = openControlsScreen;
 
   const btnCloseControls = $("btn-close-controls");
   if (btnCloseControls) btnCloseControls.onclick = () => showScreen(screenBeforeControls);
 
+  // ---------------------------------------------------------
+  // Константы и Ассеты
+  // ---------------------------------------------------------
   const AVATARS = ["1", "2", "3", "4", "5", "6", "7", "8"];
   const charSrc = (id) => `/static/assets/${id}.png`;
   const ASSET = {
@@ -47,20 +55,17 @@
     diamond: "/static/assets/diamond.png",
     roleInnocent: "/static/assets/9.png",   // свиток "мирный"
     roleThief: "/static/assets/10.png",     // свиток "вор"
-    hint: "/static/assets/11.png",          // визуальная подсказка по управлению (11.png)
+    hint: "/static/assets/11.png",          // картинка управления (11.png)
   };
 
-  // ---------------------------------------------------------
-  // Предзагрузка картинок
-  // ---------------------------------------------------------
-  const charImg = {};       // id -> Image
-  const imgReady = {};      // src -> Image (общий кэш для остальных ассетов)
+  const charImg = {};       // Кэш для персонажей: id -> Image
+  const imgReady = {};      // Кэш для остальных ассетов: key -> Image
 
   function loadImage(src) {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => resolve(img);
-      img.onerror = () => resolve(img); // не блокируем игру, если картинка не загрузилась
+      img.onerror = () => resolve(img);
       img.src = src;
     });
   }
@@ -73,28 +78,29 @@
     return entries;
   })();
 
+  // ---------------------------------------------------------
+  // Глобальные переменные состояния
+  // ---------------------------------------------------------
   let ws = null;
   let myId = null;
   let isHost = false;
   let selectedAvatar = AVATARS[0];
   let iAmThief = false;
   let roomCode = "";
-  let desiredPlayers = 3;      // выбор при создании комнаты
-  let roomMaxPlayers = 3;      // фактический размер комнаты (приходит с сервера)
-  let latestLobbyPlayers = []; // для перерисовки пикера аватарок при live-обновлениях
+  let desiredPlayers = 3;
+  let roomMaxPlayers = 3;
+  let latestLobbyPlayers = [];
 
-  // Статические данные уровней (маза/сундуки/алмазы), приходят один раз при старте игры
   let world = { tile: 40, grid_w: 19, grid_h: 19, num_levels: 3, steal_range: 72 };
-  let levels = [];      // [{maze, exit_x, chests:[{id,x,y}], diamond_piles:[{id,x,y,count}]}]
+  let levels = [];
   let myLevel = 0;
 
-  // Динамическое состояние (обновляется каждый тик)
-  let players = {};     // id -> {id,name,avatar,level,x,y,diamonds,opening,steal_cd,connected}
-  let chestsState = []; // по уровням: [{id,opened,progress}]
-  let pilesState = [];  // по уровням: [{id,collected}]
+  let players = {};
+  let chestsState = [];
+  let pilesState = [];
 
-  const PLAYER_SIZE_RATIO = 0.55;   // должно совпадать с PLAYER_SIZE/TILE на сервере
-  const pileOffsetsCache = {};      // pileId -> [{dx,dy}] случайный, но стабильный разброс алмазов
+  const PLAYER_SIZE_RATIO = 0.55;
+  const pileOffsetsCache = {};
 
   function pileOffsets(pile) {
     if (!pileOffsetsCache[pile.id]) {
@@ -111,7 +117,7 @@
   }
 
   // ---------------------------------------------------------
-  // Экран входа
+  // Экран подключения (Join)
   // ---------------------------------------------------------
   function randomName() {
     const n = ["Лиса", "Сова", "Тигр", "Панда", "Ёж", "Кот", "Волк", "Заяц"];
@@ -192,7 +198,7 @@
   }
 
   // ---------------------------------------------------------
-  // Обработка сообщений сервера
+  // Сетевые события
   // ---------------------------------------------------------
   function handleMessage(msg) {
     switch (msg.type) {
@@ -242,7 +248,7 @@
   }
 
   // ---------------------------------------------------------
-  // Лобби
+  // Лобби (Комната ожидания)
   // ---------------------------------------------------------
   function buildAvatarPicker() {
     const wrap = $("avatar-picker");
@@ -331,7 +337,7 @@
   }
 
   // ---------------------------------------------------------
-  // Экран роли (приватный — виден только на своём устройстве)
+  // Экран раскрытия роли
   // ---------------------------------------------------------
   function showRoleScreen() {
     const title = $("role-title");
@@ -340,7 +346,7 @@
     if (iAmThief) {
       if (img) img.src = ASSET.roleThief;
       if (title) { title.textContent = "Ты — ВОР!"; title.className = "thief"; }
-      if (desc) desc.textContent = "Собирай алмазы и воруй у других: подойди близко и нажми «Украсть». Обычно 3💎, а если жертва открывает сундук — 10💎. После кражи — перезарядка.";
+      if (desc) desc.textContent = "Собирай алмазы и воруй у других: подойди близко и нажми «Украсть». Обычно 3💎, а если жертва открывает сундук — 10💎.";
     } else {
       if (img) img.src = ASSET.roleInnocent;
       if (title) { title.textContent = "Ты — МИРНЫЙ"; title.className = "innocent"; }
@@ -360,11 +366,11 @@
   }
 
   // ---------------------------------------------------------
-  // Игровой экран: canvas + ввод
+  // Отрисовка игрового процесса
   // ---------------------------------------------------------
   const canvas = $("game-canvas");
   const ctx = canvas ? canvas.getContext("2d") : null;
-  let tileSize = 20;      // пикселей канваса на один тайл
+  let tileSize = 20;
 
   function setupCanvas() {
     resizeCanvas();
@@ -458,6 +464,7 @@
     const stoneImg = imgReady.stone;
     const stoneOk = stoneImg && stoneImg.complete && stoneImg.naturalWidth > 0;
 
+    // Сетка карты и стены
     for (let y = 0; y < world.grid_h; y++) {
       for (let x = 0; x < world.grid_w; x++) {
         const px = x * tileSize, py = y * tileSize;
@@ -477,7 +484,7 @@
       }
     }
 
-    // алмазы
+    // Алмазы
     const piles = pilesState[myLevel] || [];
     const pileMap = {}; piles.forEach((d) => (pileMap[d.id] = d));
     const diamondImg = imgReady.diamond;
@@ -497,7 +504,7 @@
       });
     });
 
-    // сундуки
+    // Сундуки
     const chests = chestsState[myLevel] || [];
     const chestMap = {}; chests.forEach((c) => (chestMap[c.id] = c));
     const chestImg = imgReady.chest;
@@ -522,7 +529,7 @@
       }
     });
 
-    // Кольцо дальности кражи (видит ТОЛЬКО вор)
+    // Радиус кражи для вора
     if (iAmThief && players[myId] && players[myId].level === myLevel) {
       const me = players[myId];
       const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
@@ -537,7 +544,7 @@
       ctx.setLineDash([]);
     }
 
-    // игроки на этом же этаже
+    // Игроки
     Object.values(players).forEach((p) => {
       if (p.level !== myLevel || !p.connected) return;
       const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
@@ -567,7 +574,7 @@
   }
 
   // ---------------------------------------------------------
-  // Ввод: клавиатура
+  // Управление с клавиатуры
   // ---------------------------------------------------------
   const keyState = { up: false, down: false, left: false, right: false };
   let lastSentInput = "";
@@ -616,7 +623,7 @@
   }
 
   // ---------------------------------------------------------
-  // Ввод: виртуальный джойстик (touch / mouse)
+  // Виртуальный джойстик и тач-управление
   // ---------------------------------------------------------
   const joyBase = $("joystick-base");
   const joyKnob = $("joystick-knob");
@@ -675,7 +682,7 @@
   window.addEventListener("mousemove", (e) => { if (joyActive && joyId === "mouse") joyMove(e.clientX, e.clientY); });
   window.addEventListener("mouseup", () => { if (joyId === "mouse") joyEnd(); });
 
-  // Кнопка «Открыть»
+  // Кнопка взаимодействия с сундуками
   const btnAction = $("btn-action");
   if (btnAction) {
     ["touchstart", "mousedown"].forEach((ev) =>
@@ -686,7 +693,7 @@
     );
   }
 
-  // Кнопка «Украсть»
+  // Кнопка кражи
   const btnSteal = $("btn-steal");
   if (btnSteal) {
     btnSteal.addEventListener("touchstart", (e) => {
@@ -725,7 +732,7 @@
   }
 
   // ---------------------------------------------------------
-  // Результаты
+  // Экран результатов
   // ---------------------------------------------------------
   function showResult(msg) {
     const title = $("result-title");
