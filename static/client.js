@@ -14,32 +14,30 @@
     });
   }
 
-  function openControls() {
-    const currentActive = screens.find((s) => {
-      const el = $("screen-" + s);
-      return el && el.classList.contains("active");
-    });
-    if (currentActive && currentActive !== "controls") {
-      screenBeforeControls = currentActive;
+  function openControlsScreen() {
+    const active = screens.find((s) => $("screen-" + s) && $("screen-" + s).classList.contains("active"));
+    if (active && active !== "controls") {
+      screenBeforeControls = active;
     }
-    const img = $("controls-image") || $("img-controls");
-    if (img) img.src = ASSET.controls;
+    updateControlsHintImage();
     showScreen("controls");
   }
 
-  document.addEventListener("click", (e) => {
-    const target = e.target.closest("#btn-open-controls, .btn-open-controls");
-    if (target) {
-      openControls();
+  function updateControlsHintImage() {
+    const hintImg = $("img-controls-hint") || $("controls-image") || $("controls-img");
+    if (hintImg && ASSET.hint) {
+      hintImg.src = ASSET.hint;
     }
-  });
+  }
 
-  document.addEventListener("DOMContentLoaded", () => {
-    const btnClose = $("btn-close-controls");
-    if (btnClose) {
-      btnClose.onclick = () => showScreen(screenBeforeControls);
-    }
-  });
+  const btnOpenControls = $("btn-open-controls");
+  if (btnOpenControls) btnOpenControls.onclick = openControlsScreen;
+
+  const btnOpenControlsGame = $("btn-open-controls-game") || $("btn-hint");
+  if (btnOpenControlsGame) btnOpenControlsGame.onclick = openControlsScreen;
+
+  const btnCloseControls = $("btn-close-controls");
+  if (btnCloseControls) btnCloseControls.onclick = () => showScreen(screenBeforeControls);
 
   const AVATARS = ["1", "2", "3", "4", "5", "6", "7", "8"];
   const charSrc = (id) => `/static/assets/${id}.png`;
@@ -49,7 +47,7 @@
     diamond: "/static/assets/diamond.png",
     roleInnocent: "/static/assets/9.png",   // свиток "мирный"
     roleThief: "/static/assets/10.png",     // свиток "вор"
-    controls: "/static/assets/11.png",      // подсказка по управлению
+    hint: "/static/assets/11.png",          // визуальная подсказка по управлению (11.png)
   };
 
   // ---------------------------------------------------------
@@ -81,9 +79,12 @@
   let selectedAvatar = AVATARS[0];
   let iAmThief = false;
   let roomCode = "";
+  let desiredPlayers = 3;      // выбор при создании комнаты
+  let roomMaxPlayers = 3;      // фактический размер комнаты (приходит с сервера)
+  let latestLobbyPlayers = []; // для перерисовки пикера аватарок при live-обновлениях
 
   // Статические данные уровней (маза/сундуки/алмазы), приходят один раз при старте игры
-  let world = { tile: 40, grid_w: 19, grid_h: 19, num_levels: 3 };
+  let world = { tile: 40, grid_w: 19, grid_h: 19, num_levels: 3, steal_range: 72 };
   let levels = [];      // [{maze, exit_x, chests:[{id,x,y}], diamond_piles:[{id,x,y,count}]}]
   let myLevel = 0;
 
@@ -116,28 +117,50 @@
     const n = ["Лиса", "Сова", "Тигр", "Панда", "Ёж", "Кот", "Волк", "Заяц"];
     return n[Math.floor(Math.random() * n.length)] + Math.floor(Math.random() * 90 + 10);
   }
-  $("input-name").value = randomName();
+  if ($("input-name")) $("input-name").value = randomName();
 
-  $("btn-create").onclick = async () => {
-    $("join-error").textContent = "";
-    try {
-      const res = await fetch("/api/new_room");
-      const data = await res.json();
-      $("input-room").value = data.room;
-      connect(data.room);
-    } catch (e) {
-      $("join-error").textContent = "Не удалось создать комнату. Проверь соединение.";
+  function buildPlayersCountPicker() {
+    const wrap = $("players-count-picker");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    for (let n = 3; n <= 8; n++) {
+      const cell = document.createElement("div");
+      cell.className = "count-cell" + (n === desiredPlayers ? " selected" : "");
+      cell.textContent = n;
+      cell.onclick = () => {
+        desiredPlayers = n;
+        [...wrap.children].forEach((c) => c.classList.remove("selected"));
+        cell.classList.add("selected");
+      };
+      wrap.appendChild(cell);
     }
-  };
+  }
+  buildPlayersCountPicker();
 
-  $("btn-join").onclick = () => {
-    const code = $("input-room").value.trim().toUpperCase();
-    if (!code) {
-      $("join-error").textContent = "Введи код комнаты.";
-      return;
-    }
-    connect(code);
-  };
+  if ($("btn-create")) {
+    $("btn-create").onclick = async () => {
+      if ($("join-error")) $("join-error").textContent = "";
+      try {
+        const res = await fetch(`/api/new_room?players=${desiredPlayers}`);
+        const data = await res.json();
+        if ($("input-room")) $("input-room").value = data.room;
+        connect(data.room);
+      } catch (e) {
+        if ($("join-error")) $("join-error").textContent = "Не удалось создать комнату. Проверь соединение.";
+      }
+    };
+  }
+
+  if ($("btn-join")) {
+    $("btn-join").onclick = () => {
+      const code = $("input-room") ? $("input-room").value.trim().toUpperCase() : "";
+      if (!code) {
+        if ($("join-error")) $("join-error").textContent = "Введи код комнаты.";
+        return;
+      }
+      connect(code);
+    };
+  }
 
   function connect(code) {
     roomCode = code;
@@ -145,19 +168,23 @@
     ws = new WebSocket(`${proto}://${location.host}/ws/${code}`);
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({
+      const inputName = $("input-name");
+      send({
         type: "join",
-        name: $("input-name").value.trim() || randomName(),
+        name: (inputName && inputName.value.trim()) || randomName(),
         avatar: selectedAvatar,
-      }));
+      });
     };
     ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
     ws.onclose = () => {
-      if ($("screen-join").classList.contains("active")) return;
-      $("join-error").textContent = "Соединение потеряно.";
+      const joinScreen = $("screen-join");
+      if (joinScreen && joinScreen.classList.contains("active")) return;
+      if ($("join-error")) $("join-error").textContent = "Соединение потеряно.";
       showScreen("join");
     };
-    ws.onerror = () => { $("join-error").textContent = "Ошибка соединения."; };
+    ws.onerror = () => {
+      if ($("join-error")) $("join-error").textContent = "Ошибка соединения.";
+    };
   }
 
   function send(obj) {
@@ -170,12 +197,14 @@
   function handleMessage(msg) {
     switch (msg.type) {
       case "error":
-        $("join-error").textContent = msg.message;
+        if ($("join-error")) $("join-error").textContent = msg.message;
         break;
       case "joined":
         myId = msg.you;
         isHost = msg.host;
-        $("lobby-room-code").textContent = roomCode;
+        selectedAvatar = msg.avatar || selectedAvatar;
+        roomMaxPlayers = msg.max_players || roomMaxPlayers;
+        if ($("lobby-room-code")) $("lobby-room-code").textContent = roomCode;
         buildAvatarPicker();
         showScreen("lobby");
         break;
@@ -192,7 +221,7 @@
       case "play_start":
         showScreen("game");
         setupCanvas();
-        $("btn-steal").classList.toggle("hidden", !iAmThief);
+        if ($("btn-steal")) $("btn-steal").classList.toggle("hidden", !iAmThief);
         break;
       case "state":
         applyState(msg);
@@ -201,7 +230,7 @@
         showVoteScreen();
         break;
       case "vote_progress":
-        $("vote-status").textContent = `Проголосовали: ${msg.voted.length}/3`;
+        if ($("vote-status")) $("vote-status").textContent = `Проголосовали: ${msg.voted.length}/${roomMaxPlayers}`;
         break;
       case "player_left":
         if (players[msg.id]) players[msg.id].connected = false;
@@ -217,44 +246,85 @@
   // ---------------------------------------------------------
   function buildAvatarPicker() {
     const wrap = $("avatar-picker");
+    if (!wrap) return;
     wrap.innerHTML = "";
     AVATARS.forEach((id) => {
       const cell = document.createElement("div");
-      cell.className = "avatar-cell" + (id === selectedAvatar ? " selected" : "");
+      cell.className = "avatar-cell";
+      cell.dataset.avatarId = id;
       const img = document.createElement("img");
       img.src = charSrc(id);
       img.alt = "avatar " + id;
       cell.appendChild(img);
       cell.onclick = () => {
+        if (cell.classList.contains("taken")) return;
         selectedAvatar = id;
-        [...wrap.children].forEach((c) => c.classList.remove("selected"));
-        cell.classList.add("selected");
         send({ type: "set_avatar", avatar: id });
+        refreshAvatarPicker();
       };
       wrap.appendChild(cell);
     });
+    refreshAvatarPicker();
+  }
+
+  function refreshAvatarPicker() {
+    const wrap = $("avatar-picker");
+    if (!wrap) return;
+    const takenByOthers = new Set(
+      latestLobbyPlayers.filter((p) => p.id !== myId).map((p) => p.avatar)
+    );
+    [...wrap.children].forEach((cell) => {
+      const id = cell.dataset.avatarId;
+      const taken = takenByOthers.has(id) && id !== selectedAvatar;
+      cell.classList.toggle("taken", taken);
+      cell.classList.toggle("selected", id === selectedAvatar);
+    });
+    if ($("avatar-hint")) $("avatar-hint").textContent = "Серые персонажи уже заняты другими игроками.";
   }
 
   function renderLobby(msg) {
     isHost = msg.host === myId;
+    roomMaxPlayers = msg.max_players || roomMaxPlayers;
+    latestLobbyPlayers = msg.players;
+
+    const mine = msg.players.find((p) => p.id === myId);
+    if (mine) selectedAvatar = mine.avatar;
+    refreshAvatarPicker();
+
     const list = $("lobby-players");
-    list.innerHTML = "";
-    msg.players.forEach((p) => {
-      const row = document.createElement("div");
-      row.className = "player-row";
-      row.innerHTML = `<img class="pav" src="${charSrc(p.avatar)}"><span class="name">${escapeHtml(p.name)}${p.id === myId ? " (ты)" : ""}</span>` +
-        (msg.host === p.id ? `<span class="tag">хост</span>` : "");
-      list.appendChild(row);
-    });
-    const ready = msg.players.length === 3;
-    $("btn-start").disabled = !(ready && isHost);
-    $("btn-start").classList.toggle("hidden", !isHost);
-    $("lobby-hint").textContent = ready
-      ? (isHost ? "Все в сборе — можно начинать!" : "Ждём, пока хост начнёт игру…")
-      : `Ждём игроков: ${msg.players.length}/3`;
+    if (list) {
+      list.innerHTML = "";
+      msg.players.forEach((p) => {
+        const row = document.createElement("div");
+        row.className = "player-row";
+        row.innerHTML = `<img class="pav" src="${charSrc(p.avatar)}"><span class="name">${escapeHtml(p.name)}${p.id === myId ? " (ты)" : ""}</span>` +
+          (msg.host === p.id ? `<span class="tag">хост</span>` : "");
+        list.appendChild(row);
+      });
+    }
+    const need = roomMaxPlayers;
+    const ready = msg.players.length === need;
+    const btnStart = $("btn-start");
+    if (btnStart) {
+      btnStart.disabled = !(ready && isHost);
+      btnStart.classList.toggle("hidden", !isHost);
+    }
+    if ($("lobby-need")) $("lobby-need").textContent = `Нужно ${need} ${pluralPlayers(need)}, чтобы начать.`;
+    if ($("lobby-hint")) {
+      $("lobby-hint").textContent = ready
+        ? (isHost ? "Все в сборе — можно начинать!" : "Ждём, пока хост начнёт игру…")
+        : `Ждём игроков: ${msg.players.length}/${need}`;
+    }
   }
 
-  $("btn-start").onclick = () => send({ type: "start_game" });
+  function pluralPlayers(n) {
+    const mod10 = n % 10, mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return "игрок";
+    if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return "игрока";
+    return "игроков";
+  }
+
+  if ($("btn-start")) $("btn-start").onclick = () => send({ type: "start_game" });
 
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -268,34 +338,33 @@
     const desc = $("role-desc");
     const img = $("role-image");
     if (iAmThief) {
-      img.src = ASSET.roleThief;
-      title.textContent = "Ты — ВОР!";
-      title.className = "thief";
-      desc.textContent = "Собирай алмазы и воруй у других: подойди близко и нажми «Украсть». Обычно 3💎, а если жертва открывает сундук — 10💎. После кражи — перезарядка.";
+      if (img) img.src = ASSET.roleThief;
+      if (title) { title.textContent = "Ты — ВОР!"; title.className = "thief"; }
+      if (desc) desc.textContent = "Собирай алмазы и воруй у других: подойди близко и нажми «Украсть». Обычно 3💎, а если жертва открывает сундук — 10💎. После кражи — перезарядка.";
     } else {
-      img.src = ASSET.roleInnocent;
-      title.textContent = "Ты — МИРНЫЙ";
-      title.className = "innocent";
-      desc.textContent = "Собирай алмазы и открывай сундуки (держи «Открыть», стоя рядом). Следи за счётом — среди вас прячется вор!";
+      if (img) img.src = ASSET.roleInnocent;
+      if (title) { title.textContent = "Ты — МИРНЫЙ"; title.className = "innocent"; }
+      if (desc) desc.textContent = "Собирай алмазы и открывай сундуки (держи «Открыть», стоя рядом). Следи за счётом — среди вас прячется вор!";
     }
-    $("role-wait").textContent = "";
-    $("btn-role-ready").disabled = false;
+    if ($("role-wait")) $("role-wait").textContent = "";
+    if ($("btn-role-ready")) $("btn-role-ready").disabled = false;
     showScreen("role");
   }
 
-  $("btn-role-ready").onclick = () => {
-    send({ type: "role_ack" });
-    $("btn-role-ready").disabled = true;
-    $("role-wait").textContent = "Ждём остальных игроков…";
-  };
+  if ($("btn-role-ready")) {
+    $("btn-role-ready").onclick = () => {
+      send({ type: "role_ack" });
+      $("btn-role-ready").disabled = true;
+      if ($("role-wait")) $("role-wait").textContent = "Ждём остальных игроков…";
+    };
+  }
 
   // ---------------------------------------------------------
   // Игровой экран: canvas + ввод
   // ---------------------------------------------------------
   const canvas = $("game-canvas");
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas ? canvas.getContext("2d") : null;
   let tileSize = 20;      // пикселей канваса на один тайл
-  let stonePattern = null;
 
   function setupCanvas() {
     resizeCanvas();
@@ -303,7 +372,9 @@
   }
 
   function resizeCanvas() {
+    if (!canvas) return;
     const wrap = $("game-wrap");
+    if (!wrap) return;
     const availW = wrap.clientWidth;
     const availH = wrap.clientHeight;
     const worldTiles = world.grid_w;
@@ -315,14 +386,12 @@
     tileSize = size / worldTiles;
   }
 
-  // Масштаб перевода координат сервера (логические "мировые" пиксели, TILE=world.tile)
-  // в пиксели канваса (tileSize на тайл).
   function worldScale() {
     return tileSize / (world.tile || 40);
   }
 
   function applyState(msg) {
-    $("hud-timer").textContent = formatTime(msg.timer);
+    if ($("hud-timer")) $("hud-timer").textContent = formatTime(msg.timer);
     players = {};
     msg.players.forEach((p) => (players[p.id] = p));
     chestsState = msg.chests;
@@ -342,6 +411,7 @@
 
   function renderHudScores() {
     const wrap = $("hud-scores");
+    if (!wrap) return;
     wrap.innerHTML = "";
     Object.values(players).forEach((p) => {
       const el = document.createElement("div");
@@ -353,6 +423,7 @@
 
   function spawnFloater(ev) {
     const wrap = $("floaters");
+    if (!wrap || !canvas) return;
     const rect = canvas.getBoundingClientRect();
     const scale = worldScale();
 
@@ -370,6 +441,7 @@
     }
 
     if (ev.type === "steal") {
+      if (!iAmThief) return;
       makeFloater(ev.target, `-${ev.amount}💎`, "#ff6767");
       makeFloater(ev.thief, `+${ev.amount}💎`, "#00d68f");
     } else if (ev.type === "chest") {
@@ -378,12 +450,11 @@
   }
 
   function draw() {
-    if (!levels.length) return;
+    if (!ctx || !levels.length) return;
     const lvl = levels[myLevel];
     const scale = worldScale();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // если текстура камня ещё не загрузилась — используем плоскую заливку как запасной вариант
     const stoneImg = imgReady.stone;
     const stoneOk = stoneImg && stoneImg.complete && stoneImg.naturalWidth > 0;
 
@@ -406,7 +477,7 @@
       }
     }
 
-    // алмазы (россыпью, как в исходной игре)
+    // алмазы
     const piles = pilesState[myLevel] || [];
     const pileMap = {}; piles.forEach((d) => (pileMap[d.id] = d));
     const diamondImg = imgReady.diamond;
@@ -451,18 +522,27 @@
       }
     });
 
+    // Кольцо дальности кражи (видит ТОЛЬКО вор)
+    if (iAmThief && players[myId] && players[myId].level === myLevel) {
+      const me = players[myId];
+      const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
+      const centerX = me.x * scale + hitboxSize / 2, centerY = me.y * scale + hitboxSize / 2;
+      const rangePx = (world.steal_range || 72) * scale;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, rangePx, 0, Math.PI * 2);
+      ctx.setLineDash([6, 6]);
+      ctx.strokeStyle = "rgba(255,103,103,0.55)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     // игроки на этом же этаже
     Object.values(players).forEach((p) => {
       if (p.level !== myLevel || !p.connected) return;
       const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
       const px = p.x * scale, py = p.y * scale;
       const centerX = px + hitboxSize / 2, centerY = py + hitboxSize / 2;
-
-      // мягкое пятно под ногами, чтобы отличать себя от других
-      ctx.beginPath();
-      ctx.arc(centerX, centerY + hitboxSize * 0.25, hitboxSize / 2 + 3, 0, Math.PI * 2);
-      ctx.fillStyle = p.id === myId ? "rgba(0,214,143,0.35)" : "rgba(255,255,255,0.15)";
-      ctx.fill();
 
       const img = charImg[p.avatar];
       if (img && img.complete && img.naturalWidth > 0) {
@@ -501,40 +581,42 @@
   }
 
   const GAME_KEYS = new Set(["w", "a", "s", "d", "W", "A", "S", "D",
-    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "f", "F"]);
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Enter"]);
   window.addEventListener("keydown", (e) => {
-    if (GAME_KEYS.has(e.key) && $("screen-game").classList.contains("active")) e.preventDefault();
+    const gameScreen = $("screen-game");
+    if (GAME_KEYS.has(e.key) && gameScreen && gameScreen.classList.contains("active")) e.preventDefault();
     handleKey(e.key, true);
   });
   window.addEventListener("keyup", (e) => {
-    if (GAME_KEYS.has(e.key) && $("screen-game").classList.contains("active")) e.preventDefault();
+    const gameScreen = $("screen-game");
+    if (GAME_KEYS.has(e.key) && gameScreen && gameScreen.classList.contains("active")) e.preventDefault();
     handleKey(e.key, false);
   });
 
   function handleKey(key, down) {
     const map = {
-      w: "up", ArrowUp: "up",
-      s: "down", ArrowDown: "down",
-      a: "left", ArrowLeft: "left",
-      d: "right", ArrowRight: "right",
+      w: "up", ArrowUp: "up", W: "up",
+      s: "down", ArrowDown: "down", S: "down",
+      a: "left", ArrowLeft: "left", A: "left",
+      d: "right", ArrowRight: "right", D: "right",
     };
     const k = map[key];
     if (k) { keyState[k] = down; sendInputIfChanged(); }
     if (key === " ") {
       e_action(down);
     }
-    if ((key === "f" || key === "F") && down) {
+    if (key === "Enter" && down) {
       send({ type: "steal" });
     }
   }
 
   function e_action(held) {
     send({ type: "action", held });
-    $("btn-action").classList.toggle("active", held);
+    if ($("btn-action")) $("btn-action").classList.toggle("active", held);
   }
 
   // ---------------------------------------------------------
-  // Ввод: виртуальный джойстик (touch)
+  // Ввод: виртуальный джойстик (touch / mouse)
   // ---------------------------------------------------------
   const joyBase = $("joystick-base");
   const joyKnob = $("joystick-knob");
@@ -542,12 +624,14 @@
   const JOY_RADIUS = 50;
 
   function joyStart(x, y, id) {
+    if (!joyBase || !joyKnob) return;
     joyActive = true; joyId = id;
     const r = joyBase.getBoundingClientRect();
     joyCenter = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
     joyMove(x, y);
   }
   function joyMove(x, y) {
+    if (!joyKnob) return;
     let dx = x - joyCenter.x, dy = y - joyCenter.y;
     const dist = Math.hypot(dx, dy);
     if (dist > JOY_RADIUS) { dx = (dx / dist) * JOY_RADIUS; dy = (dy / dist) * JOY_RADIUS; }
@@ -562,58 +646,68 @@
   }
   function joyEnd() {
     joyActive = false; joyId = null;
-    joyKnob.style.left = "37px"; joyKnob.style.top = "37px";
+    if (joyKnob) { joyKnob.style.left = "37px"; joyKnob.style.top = "37px"; }
     keyState.left = keyState.right = keyState.up = keyState.down = false;
     sendInputIfChanged();
   }
 
-  joyBase.addEventListener("touchstart", (e) => {
-    e.preventDefault();
-    const t = e.changedTouches[0];
-    joyStart(t.clientX, t.clientY, t.identifier);
-  }, { passive: false });
+  if (joyBase) {
+    joyBase.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      const t = e.changedTouches[0];
+      joyStart(t.clientX, t.clientY, t.identifier);
+    }, { passive: false });
+
+    joyBase.addEventListener("mousedown", (e) => joyStart(e.clientX, e.clientY, "mouse"));
+  }
+
   window.addEventListener("touchmove", (e) => {
     if (!joyActive) return;
     for (const t of e.changedTouches) {
       if (t.identifier === joyId) { e.preventDefault(); joyMove(t.clientX, t.clientY); }
     }
   }, { passive: false });
+
   window.addEventListener("touchend", (e) => {
     for (const t of e.changedTouches) if (t.identifier === joyId) joyEnd();
   });
-  // мышь — для отладки на десктопе
-  joyBase.addEventListener("mousedown", (e) => joyStart(e.clientX, e.clientY, "mouse"));
+
   window.addEventListener("mousemove", (e) => { if (joyActive && joyId === "mouse") joyMove(e.clientX, e.clientY); });
   window.addEventListener("mouseup", () => { if (joyId === "mouse") joyEnd(); });
 
   // Кнопка «Открыть»
   const btnAction = $("btn-action");
-  ["touchstart", "mousedown"].forEach((ev) =>
-    btnAction.addEventListener(ev, (e) => { e.preventDefault(); e_action(true); })
-  );
-  ["touchend", "mouseup", "touchcancel"].forEach((ev) =>
-    btnAction.addEventListener(ev, (e) => { e.preventDefault(); e_action(false); })
-  );
+  if (btnAction) {
+    ["touchstart", "mousedown"].forEach((ev) =>
+      btnAction.addEventListener(ev, (e) => { e.preventDefault(); e_action(true); })
+    );
+    ["touchend", "mouseup", "touchcancel"].forEach((ev) =>
+      btnAction.addEventListener(ev, (e) => { e.preventDefault(); e_action(false); })
+    );
+  }
 
   // Кнопка «Украсть»
   const btnSteal = $("btn-steal");
-  btnSteal.addEventListener("touchstart", (e) => {
-    e.preventDefault();
-    btnSteal.classList.add("active");
-    send({ type: "steal" });
-    setTimeout(() => btnSteal.classList.remove("active"), 200);
-  }, { passive: false });
-  btnSteal.addEventListener("click", () => {
-    send({ type: "steal" });
-  });
+  if (btnSteal) {
+    btnSteal.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      btnSteal.classList.add("active");
+      send({ type: "steal" });
+      setTimeout(() => btnSteal.classList.remove("active"), 200);
+    }, { passive: false });
+    btnSteal.addEventListener("click", () => {
+      send({ type: "steal" });
+    });
+  }
 
   // ---------------------------------------------------------
   // Голосование
   // ---------------------------------------------------------
   function showVoteScreen() {
     const wrap = $("vote-options");
+    if (!wrap) return;
     wrap.innerHTML = "";
-    $("vote-status").textContent = "";
+    if ($("vote-status")) $("vote-status").textContent = "";
     Object.values(players).forEach((p) => {
       if (p.id === myId) return;
       const el = document.createElement("div");
@@ -623,7 +717,7 @@
         [...wrap.children].forEach((c) => c.classList.remove("picked"));
         el.classList.add("picked");
         send({ type: "vote", target: p.id });
-        $("vote-status").textContent = "Голос принят. Ждём остальных…";
+        if ($("vote-status")) $("vote-status").textContent = "Голос принят. Ждём остальных…";
       };
       wrap.appendChild(el);
     });
@@ -637,26 +731,32 @@
     const title = $("result-title");
     const iAmInnocent = !iAmThief;
     const won = (iAmInnocent && msg.innocents_win) || (iAmThief && !msg.innocents_win);
-    title.textContent = msg.innocents_win ? "🎉 Мирные победили!" : "🥷 Вор победил!";
-    title.className = won ? "win" : "lose";
+    if (title) {
+      title.textContent = msg.innocents_win ? "🎉 Мирные победили!" : "🥷 Вор победил!";
+      title.className = won ? "win" : "lose";
+    }
 
-    $("result-thief").innerHTML = `<img class="pav" src="${charSrc(msg.thief.avatar)}"><span>Настоящий вор: ${escapeHtml(msg.thief.name)}</span>`;
+    if ($("result-thief")) {
+      $("result-thief").innerHTML = `<img class="pav" src="${charSrc(msg.thief.avatar)}"><span>Настоящий вор: ${escapeHtml(msg.thief.name)}</span>`;
+    }
 
     const scoresWrap = $("result-scores");
-    scoresWrap.innerHTML = "";
-    msg.scores
-      .slice()
-      .sort((a, b) => b.diamonds - a.diamonds)
-      .forEach((s) => {
-        const row = document.createElement("div");
-        row.className = "player-row";
-        const p = players[s.id];
-        row.innerHTML = `<img class="pav" src="${p ? charSrc(p.avatar) : ASSET.diamond}"><span class="name">${escapeHtml(s.name)}</span><span class="score">${s.diamonds}💎</span>`;
-        scoresWrap.appendChild(row);
-      });
+    if (scoresWrap) {
+      scoresWrap.innerHTML = "";
+      msg.scores
+        .slice()
+        .sort((a, b) => b.diamonds - a.diamonds)
+        .forEach((s) => {
+          const row = document.createElement("div");
+          row.className = "player-row";
+          const p = players[s.id];
+          row.innerHTML = `<img class="pav" src="${p ? charSrc(p.avatar) : ASSET.diamond}"><span class="name">${escapeHtml(s.name)}</span><span class="score">${s.diamonds}💎</span>`;
+          scoresWrap.appendChild(row);
+        });
+    }
 
     showScreen("result");
   }
 
-  $("btn-again").onclick = () => location.reload();
+  if ($("btn-again")) $("btn-again").onclick = () => location.reload();
 })();
