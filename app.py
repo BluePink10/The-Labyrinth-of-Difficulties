@@ -11,7 +11,7 @@ app = FastAPI()
 GRID_WIDTH = 21
 GRID_HEIGHT = 21
 TILE = 32
-PLAYER_SPEED = 120   пикселей в секунду
+PLAYER_SPEED = 120   # пикселей в секунду
 STEAL_RANGE = TILE * 1.5
 
 class Player:
@@ -59,7 +59,6 @@ class Room:
                 thief = random.choice(active)
                 thief.role = "thief"
             
-            # Рассылаем роли персонально или общим стейтом в зависимости от архитектуры
             await self.broadcast({
                 "type": "start_play",
                 "maze": self.maze,
@@ -93,7 +92,6 @@ class Room:
 rooms: Dict[str, Room] = {}
 
 def generate_eller_maze(width: int, height: int):
-    # Генерация лабиринта алгоритмом Эллера (упрощенно сохраняем вашу структуру)
     maze = [[1 for _ in range(width)] for _ in range(height)]
     for y in range(1, height, 2):
         for x in range(1, width, 2):
@@ -105,14 +103,14 @@ def generate_eller_maze(width: int, height: int):
     return maze
 
 def check_line_of_sight(x1: float, y1: float, x2: float, y2: float, maze) -> bool:
-    # FIX 4: Проверка стен между вором и жертвой (простейший raycast по средней точке)
+    # FIX 4: Проверка стен между вором и жертвой (raycast по средней точке)
     mid_x = (x1 + x2) / 2
     mid_y = (y1 + y2) / 2
     gx = int(mid_x // TILE)
     gy = int(mid_y // TILE)
     if 0 <= gy < len(maze) and 0 <= gx < len(maze[0]):
         if maze[gy][gx] == 1:
-            return False  две точки разделены стеной
+            return False  # две точки разделены стеной
     return True
 
 @app.websocket("/ws/{room_id}/{player_id}")
@@ -121,6 +119,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
     
     if room_id not in rooms:
         rooms[room_id] = Room(room_id)
+        # Запускаем игровой цикл для комнаты
+        rooms[room_id].game_task = asyncio.create_task(game_loop(rooms[room_id]))
+        
     room = rooms[room_id]
     
     player = Player(websocket, player_id, f"Player_{player_id[:4]}")
@@ -148,7 +149,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
                     if room.state == "PLAY":
                         nx = msg.get("x", player.x)
                         ny = msg.get("y", player.y)
-                        # Базовая проверка коллизий с лабиринтом
                         gx, gy = int(nx // TILE), int(ny // TILE)
                         if 0 <= gy < len(room.maze) and 0 <= gx < len(room.maze[0]):
                             if room.maze[gy][gx] == 0:
@@ -176,7 +176,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
     finally:
         async with room.lock:
             player.connected = False
-            # FIX 1: Если игрок отвалился во время голосования, проверяем завершение
+            # FIX 1: Если игрок отвалился во время голосования или лобби, проверяем стейт
             if room.state == "VOTE":
                 await room.maybe_finish_vote()
             elif room.state == "ROLE" or room.state == "LOBBY":
@@ -191,26 +191,27 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
 # FIX 5: Игровой цикл с выносом сетевой рассылки за пределы async with lock
 async def game_loop(room: Room):
     dt = 0.05
-    while room.state != "RESULT":
-        await asyncio.sleep(dt)
-        async with room.lock:
-            if room.state == "PLAY":
-                room.round_timer -= dt
-                if room.round_timer <= 0:
-                    room.state = "VOTE"
-                
-                # Сбор слепка состояния
-                snapshot = {
-                    "type": "state_sync",
-                    "timer": room.round_timer,
-                    "players": {
-                        p.id: {"x": p.x, "y": p.y, "diamonds": p.diamonds} 
-                        for p in room.alive_players()
+    try:
+        while room.state != "RESULT":
+            await asyncio.sleep(dt)
+            async with room.lock:
+                if room.state == "PLAY":
+                    room.round_timer -= dt
+                    if room.round_timer <= 0:
+                        room.state = "VOTE"
+                    
+                    snapshot = {
+                        "type": "state_sync",
+                        "timer": room.round_timer,
+                        "players": {
+                            p.id: {"x": p.x, "y": p.y, "diamonds": p.diamonds} 
+                            for p in room.alive_players()
+                        }
                     }
-                }
-            else:
-                snapshot = None
-        
-        # Рассылка за пределами lock для предотвращения блокировки потоков физики
-        if snapshot:
-            await room.broadcast(snapshot)
+                else:
+                    snapshot = None
+            
+            if snapshot:
+                await room.broadcast(snapshot)
+    except asyncio.CancelledError:
+        pass
