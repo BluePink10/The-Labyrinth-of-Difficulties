@@ -3,9 +3,18 @@ import json
 import random
 from typing import Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 app = FastAPI()
+
+# Подключаем папку со статическими файлами (html, css, js, картинки)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def read_index():
+    return FileResponse("static/index.html")
 
 # Константы игры
 GRID_WIDTH = 21
@@ -50,11 +59,9 @@ class Room:
                     p.connected = False
 
     async def maybe_begin_play(self):
-        # FIX 1: Проверяем готовность только активных игроков
         active = self.alive_players()
         if active and all(p.ready for p in active):
             self.state = "PLAY"
-            # Назначаем вора случайным образом
             if active:
                 thief = random.choice(active)
                 thief.role = "thief"
@@ -71,7 +78,6 @@ class Room:
         
         if voted_count >= len(active) and len(active) > 0:
             self.state = "RESULT"
-            # Подсчет голосов
             votes = {}
             for p in active:
                 if p.voted_for:
@@ -103,14 +109,13 @@ def generate_eller_maze(width: int, height: int):
     return maze
 
 def check_line_of_sight(x1: float, y1: float, x2: float, y2: float, maze) -> bool:
-    # FIX 4: Проверка стен между вором и жертвой (raycast по средней точке)
     mid_x = (x1 + x2) / 2
     mid_y = (y1 + y2) / 2
     gx = int(mid_x // TILE)
     gy = int(mid_y // TILE)
     if 0 <= gy < len(maze) and 0 <= gx < len(maze[0]):
         if maze[gy][gx] == 1:
-            return False  # две точки разделены стеной
+            return False
     return True
 
 @app.websocket("/ws/{room_id}/{player_id}")
@@ -119,7 +124,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
     
     if room_id not in rooms:
         rooms[room_id] = Room(room_id)
-        # Запускаем игровой цикл для комнаты
         rooms[room_id].game_task = asyncio.create_task(game_loop(rooms[room_id]))
         
     room = rooms[room_id]
@@ -131,8 +135,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
     try:
         while True:
             raw = await websocket.receive_text()
-            
-            # FIX 3: Защита от падения парсера при получении невалидного JSON
             try:
                 msg = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
@@ -161,7 +163,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
                         target = room.players.get(target_id)
                         if target and target.role == "innocent" and target.diamonds > 0:
                             dist = ((target.x - player.x)**2 + (target.y - player.y)**2)**0.5
-                            # FIX 4: Добавлена проверка видимости (стены)
                             if dist <= STEAL_RANGE and check_line_of_sight(player.x, player.y, target.x, target.y, room.maze):
                                 target.diamonds -= 1
                                 player.diamonds += 1
@@ -176,19 +177,16 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
     finally:
         async with room.lock:
             player.connected = False
-            # FIX 1: Если игрок отвалился во время голосования или лобби, проверяем стейт
             if room.state == "VOTE":
                 await room.maybe_finish_vote()
             elif room.state == "ROLE" or room.state == "LOBBY":
                 await room.maybe_begin_play()
             
-            # Удаляем комнату, если все игроки отключились
             if not room.alive_players():
                 if room.game_task:
                     room.game_task.cancel()
                 rooms.pop(room_id, None)
 
-# FIX 5: Игровой цикл с выносом сетевой рассылки за пределы async with lock
 async def game_loop(room: Room):
     dt = 0.05
     try:
