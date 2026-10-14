@@ -1,175 +1,243 @@
-// ============================================================
-// Thief & Innocents — клиентский скрипт (Согласован с index.html)
-// ============================================================
-(() => {
-  const initGame = () => {
-    const $ = (id) => document.getElementById(id);
+<!DOCTYPE html>
 
-    const screens = ["join", "lobby", "role", "game", "vote", "result", "controls"];
-    let screenBeforeControls = "join";
+<html lang="ru">
 
-    const AVATARS = ["1", "2", "3", "4", "5", "6", "7", "8"];
-    const charSrc = (id) => `/static/assets/${id}.png`;
-    const ASSET = {
-      stone: "/static/assets/stone.png",
-      chest: "/static/assets/chest.png",
-      diamond: "/static/assets/diamond.png",
-      roleInnocent: "/static/assets/9.png",    
-      roleThief: "/static/assets/10.png",     
-      hint: "/static/assets/11.png",          
-    };
+<head>
 
-    // ---------------------------------------------------------
-    // Управление экранами
-    // ---------------------------------------------------------
-    function showScreen(name) {
-      screens.forEach((s) => {
-        const el = $("screen-" + s);
-        if (el) {
-          const isActive = (s === name);
-          el.classList.toggle("active", isActive);
-          el.style.display = isActive ? "flex" : "none";
-        }
-      });
-    }
+<meta charset="UTF-8">
 
-    // Принудительно показываем стартовый экран при запуске
-    showScreen("join");
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 
-    // Обработчики экрана управления (из вашего HTML: btn-open-controls, btn-close-controls)
-    const btnOpenControls = $("btn-open-controls");
-    if (btnOpenControls) {
-      btnOpenControls.onclick = () => {
-        const active = screens.find(s => $("screen-" + s)?.classList.contains("active"));
-        if (active && active !== "controls") screenBeforeControls = active;
-        showScreen("controls");
-      };
-    }
+<title>Вор и Мирные</title>
 
-    const btnCloseControls = $("btn-close-controls");
-    if (btnCloseControls) {
-      btnCloseControls.onclick = () => showScreen(screenBeforeControls);
-    }
+<link rel="stylesheet" href="/static/style.css?v=3">
 
-    // Дополнительная кнопка управления поверх игры
-    const gameWrap = $("game-wrap") \vert{}\vert{} $("screen-game");
-    if (gameWrap && !$("btn-open-controls-game")) {
-      const btn = document.createElement("button");
-      btn.id = "btn-open-controls-game";
-      btn.innerHTML = "🎮 Управление";
-      btn.style.cssText = "position: absolute; top: 15px; right: 15px; z-index: 1000; padding: 10px 15px; background: rgba(20, 20, 25, 0.85); color: #00d68f; border: 2px solid #00d68f; border-radius: 10px; cursor: pointer; font-weight: bold; font-size: 14px;";
-      btn.onclick = () => {
-        screenBeforeControls = "game";
-        showScreen("controls");
-      };
-      gameWrap.appendChild(btn);
-    }
+</head>
 
-    // ---------------------------------------------------------
-    // Состояние игры и выбор количества игроков
-    // ---------------------------------------------------------
-    let ws = null;
-    let myId = null;
-    let isHost = false;
-    let selectedAvatar = AVATARS[0];
-    let desiredPlayers = 3;
-    let roomCode = "";
+<body>
 
-    function randomName() {
-      const n = ["Лиса", "Сова", "Тигр", "Панда", "Ёж", "Кот", "Волк", "Заяц"];
-      return n[Math.floor(Math.random() * n.length)] + Math.floor(Math.random() * 90 + 10);
-    }
-    
-    const nameInput = $("input-name");
-    if (nameInput && !nameInput.value) {
-      nameInput.value = randomName();
-    }
 
-    // Заполняем сетку выбора игроков (3 до 8) для элемента #players-count-picker из HTML
-    const pickerContainer = $("players-count-picker");
-    if (pickerContainer) {
-      pickerContainer.innerHTML = "";
-      for (let i = 3; i <= 8; i++) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "player-count-btn " + (i === desiredPlayers ? "selected" : "");
-        btn.textContent = i;
-        btn.onclick = () => {
-          desiredPlayers = i;
-          pickerContainer.querySelectorAll(".player-count-btn").forEach(b => b.classList.remove("selected"));
-          btn.classList.add("selected");
-        };
-        pickerContainer.appendChild(btn);
-      }
-    }
 
-    // ---------------------------------------------------------
-    // Подключение по WebSocket
-    // ---------------------------------------------------------
-    function createOrJoinRoom(code) {
-      const name = (nameInput?.value || "").trim() || "Игрок";
-      roomCode = code.toUpperCase().trim();
-      
-      const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      ws = new WebSocket(`${proto}//${location.host}/ws/${roomCode}`);
+<!-- ЭКРАН: вход / создание комнаты -->
 
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "join", name, avatar: selectedAvatar }));
-      };
+<div id="screen-join" class="screen active">
 
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "joined") {
-          myId = msg.you;
-          isHost = msg.host;
-          showScreen("lobby");
-        } else if (msg.type === "lobby_state") {
-          roomCode = msg.room;
-          isHost = (msg.host === myId);
-          if ($("lobby-room-code")) $("lobby-room-code").textContent = roomCode;
-        } else if (msg.type === "error") {
-          const errEl = $("join-error");
-          if (errEl) errEl.textContent = msg.message;
-          else alert(msg.message);
-        }
-      };
-    }
+  <div class="card">
 
-    // Кнопка создания комнаты (#btn-create в вашем HTML)
-    const btnCreate = $("btn-create");
-    if (btnCreate) {
-      btnCreate.onclick = async () => {
-        try {
-          const res = await fetch(`/api/new_room?players=${desiredPlayers}`);
-          const data = await res.json();
-          if (data.room) {
-            createOrJoinRoom(data.room);
-          }
-        } catch (e) {
-          console.error("Ошибка при создании комнаты:", e);
-        }
-      };
-    }
+    <button id="btn-open-controls" class="link-btn">❓ Управление</button>
 
-    // Кнопка входа по коду (#btn-join в вашем HTML)
-    const btnJoin = $("btn-join");
-    if (btnJoin) {
-      btnJoin.onclick = () => {
-        const code = ($("input-room")?.value || "").trim();
-        if (code.length >= 4) {
-          createOrJoinRoom(code);
-        } else {
-          const errEl = $("join-error");
-          if (errEl) errEl.textContent = "Введите корректный код комнаты";
-          else alert("Введите корректный код комнаты");
-        }
-      };
-    }
-  };
+    <h1>🗝️ Вор и Мирные</h1>
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initGame);
-  } else {
-    initGame();
-  }
-})();
+    <p class="sub">Мини-игра на 3–8 игроков. Один — вор, остальные — мирные жители.</p>
+
+    <label>Твоё имя</label>
+
+    <input id="input-name" maxlength="16" placeholder="Например, Аня">
+
+    <label>Сколько игроков будет играть? (для создания комнаты)</label>
+
+    <div id="players-count-picker" class="count-grid"></div>
+
+    <label>Код комнаты (если входишь по коду друга)</label>
+
+    <input id="input-room" maxlength="6" placeholder="ABCD" autocapitalize="characters">
+
+    <div class="row">
+
+      <button id="btn-create" class="primary">Создать комнату</button>
+
+      <button id="btn-join">Войти по коду</button>
+
+    </div>
+
+    <p id="join-error" class="error"></p>
+
+  </div>
+
+</div>
+
+
+
+<!-- ЭКРАН: управление -->
+
+<div id="screen-controls" class="screen">
+
+  <div class="card">
+
+    <h2>Управление</h2>
+
+    <div class="controls-list">
+
+      <div class="controls-row">
+
+        <div class="controls-what">Движение</div>
+
+        <div class="controls-how">Стрелки / WASD на компьютере · джойстик слева на телефоне</div>
+
+      </div>
+
+      <div class="controls-row">
+
+        <div class="controls-what">Открыть сундук</div>
+
+        <div class="controls-how">Пробел на компьютере (держать) · кнопка «Открыть» на телефоне (держать)</div>
+
+      </div>
+
+      <div class="controls-row">
+
+        <div class="controls-what">Украсть</div>
+
+        <div class="controls-how">Кнопка появится в игре, только если тебе достанется роль вора</div>
+
+      </div>
+
+    </div>
+
+    <p class="sub small">Джойстик и кнопки на экране появляются только на телефонах и планшетах — на компьютере используй клавиатуру.</p>
+
+    <button id="btn-close-controls" class="primary">Назад</button>
+
+  </div>
+
+</div>
+
+
+
+<!-- ЭКРАН: лобби -->
+
+<div id="screen-lobby" class="screen">
+
+  <div class="card">
+
+    <h2>Комната: <span id="lobby-room-code">----</span></h2>
+
+    <p class="sub">Отправь этот код подружкам — пусть введут его и нажмут «Войти по коду».</p>
+
+    <div id="avatar-picker" class="avatar-grid"></div>
+
+    <p id="avatar-hint" class="sub small"></p>
+
+    <div id="lobby-players" class="players-list"></div>
+
+    <p id="lobby-need" class="sub small"></p>
+
+    <button id="btn-start" class="primary" disabled>Начать игру</button>
+
+    <p id="lobby-hint" class="sub small"></p>
+
+  </div>
+
+</div>
+
+
+
+<!-- ЭКРАН: показ роли (приватно, на своём устройстве) -->
+
+<div id="screen-role" class="screen">
+
+  <div class="card role-card">
+
+    <img id="role-image" class="role-image" alt="">
+
+    <h2 id="role-title"></h2>
+
+    <p id="role-desc" class="sub"></p>
+
+    <button id="btn-role-ready" class="primary">Готов! Начать игру</button>
+
+    <p id="role-wait" class="sub small"></p>
+
+  </div>
+
+</div>
+
+
+
+<!-- ЭКРАН: игра -->
+
+<div id="screen-game" class="screen">
+
+  <div id="hud">
+
+    <div id="hud-timer">03:30</div>
+
+    <div id="hud-scores"></div>
+
+  </div>
+
+  <div id="game-wrap">
+
+    <canvas id="game-canvas"></canvas>
+
+    <div id="floaters"></div>
+
+  </div>
+
+  <div id="controls">
+
+    <div id="joystick-zone">
+
+      <div id="joystick-base"><div id="joystick-knob"></div></div>
+
+    </div>
+
+    <div id="action-buttons">
+
+      <button id="btn-steal" class="ctrl-btn steal-btn hidden">Украсть</button>
+
+      <button id="btn-action" class="ctrl-btn">Открыть</button>
+
+    </div>
+
+  </div>
+
+</div>
+
+
+
+<!-- ЭКРАН: голосование -->
+
+<div id="screen-vote" class="screen">
+
+  <div class="card">
+
+    <h2>⏰ Время вышло!</h2>
+
+    <p class="sub">Кто, по-твоему, вор?</p>
+
+    <div id="vote-options" class="vote-grid"></div>
+
+    <p id="vote-status" class="sub small"></p>
+
+  </div>
+
+</div>
+
+
+
+<!-- ЭКРАН: итоги -->
+
+<div id="screen-result" class="screen">
+
+  <div class="card">
+
+    <h2 id="result-title"></h2>
+
+    <div id="result-thief" class="sub"></div>
+
+    <div id="result-scores" class="players-list"></div>
+
+    <button id="btn-again" class="primary">Играть ещё раз</button>
+
+  </div>
+
+</div>
+
+
+
+<script src="/static/client.js?v=5"></script>
+
+</body>
+
+</html>
