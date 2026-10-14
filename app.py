@@ -4,10 +4,6 @@ Thief & Innocents — web multiplayer backend.
 От 3 до 8 игроков в комнате: 1 вор + остальные мирные жители.
 Сервер авторитетен: хранит состояние комнаты, считает физику,
 и рассылает снимки состояния всем клиентам по WebSocket.
-
-Запуск локально:
-    pip install -r requirements.txt
-    uvicorn app:app --host 0.0.0.0 --port 7860
 """
 
 import asyncio
@@ -26,39 +22,35 @@ from starlette.middleware.base import BaseHTTPMiddleware
 # ==========================================================
 # Игровые константы
 # ==========================================================
-MAZE_W = 9                     # ширина лабиринта в "ячейках" (не тайлах)
+MAZE_W = 9
 MAZE_H = 9
-GRID_W = MAZE_W * 2 + 1        # ширина сетки тайлов
+GRID_W = MAZE_W * 2 + 1
 GRID_H = MAZE_H * 2 + 1
 NUM_LEVELS = 3
 
-TILE = 40                      # логический размер тайла (пиксели "игрового мира")
+TILE = 40
 WORLD_W = GRID_W * TILE
 WORLD_H = GRID_H * TILE
 
 PLAYER_SIZE = TILE * 0.55
-PLAYER_SPEED = 190.0           # логических единиц в секунду
-TICK_RATE = 20                 # обновлений в секунду
+PLAYER_SPEED = 190.0
+TICK_RATE = 20
 DT = 1.0 / TICK_RATE
 
-GAME_DURATION = 210.0          # секунд на раунд (3.5 мин)
+GAME_DURATION = 210.0
 CHEST_OPEN_MS = 2200
 CHEST_DECAY_MULT = 1.6
 STEAL_COOLDOWN_MS = 9000
 STEAL_RANGE = TILE * 1.8
 
-# Аватарки — идентификаторы спрайтов static/assets/<id>.png (1..8)
 AVATARS = [str(i) for i in range(1, 9)]
-
-# Размер комнаты: от 3 до 8 игроков
 MIN_PLAYERS = 3
 MAX_PLAYERS = len(AVATARS)
-
 ROOM_CODE_CHARS = string.ascii_uppercase + string.digits
 
 
 # ==========================================================
-# Генерация лабиринта (алгоритм Эллера) + Тайные комнаты
+# Генерация лабиринта + Тайные комнаты
 # ==========================================================
 def generate_ellers_maze(width, height, is_top_open, is_bottom_open):
     grid_width = width * 2 + 1
@@ -129,7 +121,6 @@ def generate_level_data(level_index):
     dead_ends = get_dead_ends(maze)
     random.shuffle(dead_ends)
 
-    # Создаем тайные проходы из тупиков в стены
     for _ in range(min(2, len(dead_ends))):
         if not dead_ends:
             break
@@ -137,7 +128,7 @@ def generate_level_data(level_index):
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             nx, ny = cx + dx, cy + dy
             if 0 <= ny < GRID_H and 0 <= nx < GRID_W and maze[ny][nx] == 0:
-                maze[ny][nx] = 1  # Открываем тайный проход
+                maze[ny][nx] = 1
                 break
 
     chests_count = min(3, len(dead_ends))
@@ -162,15 +153,12 @@ def generate_level_data(level_index):
     return {"maze": maze, "exit_x": exit_x, "chests": chests, "diamond_piles": diamond_piles}
 
 
-# ==========================================================
-# Вспомогательная физика (прямоугольники в логических пикселях)
-# ==========================================================
 def rects_overlap(ax, ay, aw, ah, bx, by, bw, bh):
     return ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
 
 
 # ==========================================================
-# Игрок (серверное состояние)
+# Игрок и Комната
 # ==========================================================
 class Player:
     def __init__(self, pid, name, avatar, ws):
@@ -179,7 +167,7 @@ class Player:
         self.avatar = avatar if avatar in AVATARS else AVATARS[0]
         self.ws = ws
         self.connected = True
-        self.ready = False       # готов после экрана роли
+        self.ready = False
         self.is_thief = False
 
         self.level = 0
@@ -191,7 +179,6 @@ class Player:
         self.action_held = False
         self.is_opening = False
         self.steal_cd_ms = 0
-
         self.vote: Optional[str] = None
 
     def spawn(self, level_data_list, level_index, at_top):
@@ -210,19 +197,16 @@ class Player:
         }
 
 
-# ==========================================================
-# Комната
-# ==========================================================
 class Room:
     def __init__(self, code, max_players=MIN_PLAYERS):
         self.code = code
         self.max_players = max(MIN_PLAYERS, min(MAX_PLAYERS, max_players))
         self.players: dict[str, Player] = {}
         self.host_id: Optional[str] = None
-        self.state = "LOBBY"   # LOBBY -> ROLE -> PLAY -> VOTE -> RESULT
+        self.state = "LOBBY"
         self.levels = []
         self.timer = GAME_DURATION
-        self.events = []       # временные события (кражи) для текущего тика
+        self.events = []
         self.loop_task: Optional[asyncio.Task] = None
         self.lock = asyncio.Lock()
         self.result = None
@@ -274,9 +258,7 @@ class Room:
         }
 
     async def try_start_game(self):
-        if self.state != "LOBBY":
-            return
-        if len(self.players) != self.max_players:
+        if self.state != "LOBBY" or len(self.players) != self.max_players:
             return
         self.levels = [generate_level_data(i) for i in range(NUM_LEVELS)]
         pids = list(self.players.keys())
@@ -335,14 +317,10 @@ class Room:
                 p.steal_cd_ms = max(0, p.steal_cd_ms - int(dt * 1000))
 
             dx = dy = 0.0
-            if p.input["left"]:
-                dx -= 1
-            if p.input["right"]:
-                dx += 1
-            if p.input["up"]:
-                dy -= 1
-            if p.input["down"]:
-                dy += 1
+            if p.input["left"]: dx -= 1
+            if p.input["right"]: dx += 1
+            if p.input["up"]: dy -= 1
+            if p.input["down"]: dy += 1
             if dx != 0 and dy != 0:
                 dx *= 0.7071
                 dy *= 0.7071
@@ -366,8 +344,7 @@ class Room:
                 p.spawn(self.levels, p.level, at_top=True)
 
             for pile in self.levels[p.level]["diamond_piles"]:
-                if pile["collected"]:
-                    continue
+                if pile["collected"]: continue
                 px, py = pile["x"] * TILE, pile["y"] * TILE
                 if rects_overlap(p.x, p.y, PLAYER_SIZE, PLAYER_SIZE, px, py, TILE, TILE):
                     pile["collected"] = True
@@ -377,24 +354,20 @@ class Room:
         for p in self.alive_players():
             p.is_opening = False
         for p in self.alive_players():
-            if not p.action_held:
-                continue
+            if not p.action_held: continue
             for chest in self.levels[p.level]["chests"]:
-                if chest["opened"]:
-                    continue
+                if chest["opened"]: continue
                 cx, cy = chest["x"] * TILE, chest["y"] * TILE
                 if rects_overlap(p.x, p.y, PLAYER_SIZE, PLAYER_SIZE, cx - 8, cy - 8, TILE + 16, TILE + 16):
                     openers_by_chest[chest["id"]].append(p)
 
         for lvl in self.levels:
             for chest in lvl["chests"]:
-                if chest["opened"]:
-                    continue
+                if chest["opened"]: continue
                 openers = openers_by_chest.get(chest["id"], [])
                 if openers:
                     chest["progress"] += DT * 1000
-                    for op in openers:
-                        op.is_opening = True
+                    for op in openers: op.is_opening = True
                     if chest["progress"] >= CHEST_OPEN_MS:
                         chest["opened"] = True
                         reward = random.randint(15, 25)
@@ -483,9 +456,6 @@ class Room:
         await self.broadcast(self.result)
 
 
-# ==========================================================
-# Менеджер комнат
-# ==========================================================
 rooms: dict[str, Room] = {}
 rooms_lock = asyncio.Lock()
 
@@ -633,9 +603,7 @@ async def ws_endpoint(websocket: WebSocket, room_code: str):
             if not room.players or all(not p.connected for p in room.players.values()):
                 async with rooms_lock:
                     t = room.loop_task
-                    if t:
-                        t.cancel()
+                    if t: t.cancel()
                     rooms.pop(room.code, None)
-
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
