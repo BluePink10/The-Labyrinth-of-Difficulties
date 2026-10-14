@@ -1,10 +1,11 @@
 // ============================================================
-// Thief & Innocents — клиентский скрипт
+// Thief & Innocents — клиентский скрипт (Исправленный)
 // ============================================================
 (() => {
   const initGame = () => {
     const $ = (id) => document.getElementById(id);
 
+    // Список всех экранов игры
     const screens = ["join", "lobby", "role", "game", "vote", "result", "controls"];
     let screenBeforeControls = "join";
 
@@ -19,6 +20,26 @@
       hint: "/static/assets/11.png",          
     };
 
+    // ---------------------------------------------------------
+    // Управление экранами (Исправлено: показ стартового экрана)
+    // ---------------------------------------------------------
+    function showScreen(name) {
+      screens.forEach((s) => {
+        const el = $("screen-" + s);
+        if (el) {
+          const isActive = (s === name);
+          el.classList.toggle("active", isActive);
+          el.style.display = isActive ? "flex" : "none";
+        }
+      });
+    }
+
+    // Принудительно показываем экран входа при загрузке!
+    showScreen("join");
+
+    // ---------------------------------------------------------
+    // Сборка экрана управления
+    // ---------------------------------------------------------
     function injectControlsUI() {
       let sc = $("screen-controls");
       if (!sc) {
@@ -78,59 +99,50 @@
         btn.onmouseenter = () => btn.style.background = "rgba(0, 214, 143, 0.2)";
         btn.onmouseleave = () => btn.style.background = "rgba(20, 20, 25, 0.85)";
 
-        btn.onclick = openControlsScreen;
+        btn.onclick = () => {
+          const active = screens.find(s => $("screen-" + s)?.style.display === "flex");
+          if (active && active !== "controls") screenBeforeControls = active;
+          showScreen("controls");
+        };
         gameWrap.appendChild(btn);
       }
     }
 
     injectControlsUI();
 
-    function showScreen(name) {
-      screens.forEach((s) => {
-        const el = $("screen-" + s);
-        if (el) {
-          const isActive = (s === name);
-          el.classList.toggle("active", isActive);
-          if (el.dataset.injected || s === "controls") {
-            el.style.display = isActive ? "flex" : "none";
-          }
-        }
-      });
-    }
-
-    function openControlsScreen() {
-      const active = screens.find((s) => {
-        const el = $("screen-" + s);
-        return el && (el.classList.contains("active") || (el.style.display === "flex" && s !== "controls"));
-      });
-      if (active && active !== "controls") {
-        screenBeforeControls = active;
-      }
-      showScreen("controls");
-    }
-
     const btnOpenControls = $("btn-open-controls");
-    if (btnOpenControls) btnOpenControls.onclick = openControlsScreen;
+    if (btnOpenControls) {
+      btnOpenControls.onclick = () => {
+        screenBeforeControls = screens.find(s => $("screen-" + s)?.style.display === "flex") || "join";
+        showScreen("controls");
+      };
+    }
 
     const btnCloseControls = $("btn-close-controls");
-    if (btnCloseControls) btnCloseControls.onclick = () => showScreen(screenBeforeControls);
+    if (btnCloseControls) {
+      btnCloseControls.onclick = () => showScreen(screenBeforeControls);
+    }
 
+    // ---------------------------------------------------------
+    // Состояние и выбор параметров
+    // ---------------------------------------------------------
     let ws = null;
     let myId = null;
     let isHost = false;
     let selectedAvatar = AVATARS[0];
-    let iAmThief = false;
-    let roomCode = "";
     let desiredPlayers = 3;
+    let roomCode = "";
 
     function randomName() {
       const n = ["Лиса", "Сова", "Тигр", "Панда", "Ёж", "Кот", "Волк", "Заяц"];
       return n[Math.floor(Math.random() * n.length)] + Math.floor(Math.random() * 90 + 10);
     }
     
-    if ($("input-name")) $("input-name").value = randomName();
+    if ($("input-name")) {
+      $("input-name").value = randomName();
+    }
 
-    // Рендер кнопок выбора количества игроков
+    // Рендер кнопок выбора количества игроков (от 3 до 8)
     const pickerContainer = $("players-count-picker");
     if (pickerContainer) {
       pickerContainer.innerHTML = "";
@@ -141,15 +153,17 @@
         btn.textContent = i;
         btn.onclick = () => {
           desiredPlayers = i;
-          document.querySelectorAll(".player-count-btn").forEach(b => b.classList.remove("selected"));
+          pickerContainer.querySelectorAll(".player-count-btn").forEach(b => b.classList.remove("selected"));
           btn.classList.add("selected");
         };
         pickerContainer.appendChild(btn);
       }
     }
 
-    // Подключение к комнате
-    async function createOrJoinRoom(code) {
+    // ---------------------------------------------------------
+    // Логика подключения по WebSocket
+    // ---------------------------------------------------------
+    function createOrJoinRoom(code) {
       const name = ($("input-name")?.value || "").trim() || "Игрок";
       roomCode = code.toUpperCase().trim();
       
@@ -170,31 +184,38 @@
           roomCode = msg.room;
           isHost = (msg.host === myId);
           if ($("lobby-code")) $("lobby-code").textContent = roomCode;
-          // Здесь обновляется список игроков в лобби стандартным образом
         } else if (msg.type === "error") {
           alert(msg.message);
         }
       };
     }
 
+    // Кнопка создания новой комнаты
     const btnCreate = $("btn-create-room");
     if (btnCreate) {
       btnCreate.onclick = async () => {
         try {
           const res = await fetch(`/api/new_room?players=${desiredPlayers}`);
           const data = await res.json();
-          createOrJoinRoom(data.room);
+          if (data.room) {
+            createOrJoinRoom(data.room);
+          }
         } catch (e) {
-          console.error(e);
+          console.error("Ошибка создания комнаты:", e);
         }
       };
     }
 
+    // Кнопка присоединения по коду
     const btnJoin = $("btn-join-room");
     if (btnJoin) {
       btnJoin.onclick = () => {
-        const code = $("input-room")?.value || "";
-        if (code.length >= 4) createOrJoinRoom(code);
+        const code = ($("input-room")?.value || "").trim();
+        if (code.length >= 4) {
+          createOrJoinRoom(code);
+        } else {
+          alert("Введите корректный код комнаты (4 символа)");
+        }
       };
     }
   };
