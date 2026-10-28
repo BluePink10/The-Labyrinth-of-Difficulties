@@ -48,7 +48,7 @@
       sc.innerHTML = `
         <div style="position: relative; max-width: 95%; max-height: 90vh; display: flex; flex-direction: column; align-items: center; justify-content: center;">
           <img id="img-controls-hint" src="${ASSET.hint}" alt="Управление" style="max-width: 100%; max-height: 70vh; border-radius: 12px; object-fit: contain; box-shadow: 0 8px 30px rgba(0,0,0,0.8);">
-          <p style="color:#cfcfd8; font-size:14px; text-align:center; margin:12px 0 0; max-width:440px;">Тайный проход: ищи трещину в стене по краю этажа. Сквозь неё можно пройти в нишу с сундуком.</p>
+          <p style="color:#cfcfd8; font-size:14px; text-align:center; margin:12px 0 0; max-width:440px;">Невидимый проход ничем не отмечен — это обычная стена. Если случайно в неё зайти, перенесёт в другую комнату с сундуками. Оттуда остальных не видно. Обратно — тоже через стену в той комнате.</p>
           <button id="btn-close-controls-injected" type="button" style="margin-top:16px; padding:12px 35px; font-size:16px; border-radius:10px; border:none; background:#ff6767; color:white; cursor:pointer; font-weight:bold; text-transform:uppercase; box-shadow:0 4px 15px rgba(255,103,103,0.4);">Вернуться</button>
         </div>
       `;
@@ -139,11 +139,12 @@
     let desiredPlayers = 3;
     let roomMaxPlayers = 3;
     let latestLobbyPlayers = [];
-    let world = { tile: 40, grid_w: 23, grid_h: 23, num_levels: 3, steal_range: 72, chest_open_ms: 2200, secret_tile: 2 };
+    let world = { tile: 40, grid_w: 19, grid_h: 19, num_levels: 3, steal_range: 72, chest_open_ms: 2200 };
     let levels = [];
     let myLevel = 0;
     let players = {};
     let chestsState = [];
+    let secretChestsState = [];
     let pilesState = [];
     const PLAYER_SIZE_RATIO = 0.55;
     const pileOffsetsCache = {};
@@ -413,7 +414,7 @@
       const title = $("role-title");
       const desc = $("role-desc");
       const img = $("role-image");
-      const secretLine = " На краю каждого этажа есть трещины в стене — сквозь них проход в нишу с сундуком.";
+      const secretLine = " Где-то в обычной стене есть невидимый проход. Зайти можно только случайно — перенесёт в другую комнату с сундуками, оттуда остальных игроков не видно. Назад так же, через стену той комнаты.";
       if (iAmThief) {
         if (img) img.src = ASSET.roleThief;
         if (title) { title.textContent = "Ты — ВОР!"; title.className = "thief"; }
@@ -454,7 +455,7 @@
       if (!wrap) return;
       const availW = wrap.clientWidth;
       const availH = wrap.clientHeight;
-      const worldTiles = world.grid_w || 23;
+      const worldTiles = world.grid_w || 19;
       const size = Math.max(1, Math.floor(Math.min(availW, availH)));
       canvas.width = size;
       canvas.height = size;
@@ -473,10 +474,12 @@
       players = {};
       (msg.players || []).forEach((p) => (players[p.id] = p));
       chestsState = msg.chests || [];
+      secretChestsState = msg.secret_chests || [];
       pilesState = msg.diamond_piles || [];
       if (players[myId]) myLevel = players[myId].level;
       (msg.events || []).forEach(spawnFloater);
       renderHudScores();
+      renderPlaceLabel();
       draw();
     }
 
@@ -506,7 +509,8 @@
       const scale = worldScale();
       function makeFloater(pid, text, color) {
         const p = players[pid];
-        if (!p || p.level !== myLevel) return;
+        const me = players[myId];
+        if (!p || !me || p.level !== myLevel || (p.space || 0) !== (me.space || 0)) return;
         const el = document.createElement("div");
         el.className = "floater";
         el.textContent = text;
@@ -525,9 +529,18 @@
       }
     }
 
-    function tileOpen(maze, x, y) {
-      if (y < 0 || x < 0 || y >= maze.length || x >= maze[0].length) return false;
-      return maze[y][x] !== 0;
+    function renderPlaceLabel() {
+      const hud = $("hud");
+      if (!hud) return;
+      let el = $("hud-place");
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "hud-place";
+        el.style.cssText = "font-size:12px;font-weight:bold;color:#cfcfd8;letter-spacing:.03em;text-align:center;";
+        hud.insertBefore(el, $("hud-scores"));
+      }
+      const secret = players[myId] && players[myId].space === 1;
+      el.textContent = secret ? "Другая комната" : "";
     }
 
     function draw() {
@@ -535,36 +548,29 @@
       const lvl = levels[myLevel];
       if (!lvl) return;
       const scale = worldScale();
-      const secretTile = world.secret_tile == null ? 2 : world.secret_tile;
       const chestOpenMs = world.chest_open_ms || 2200;
+      const meNow = players[myId];
+      const inSecret = !!(meNow && meNow.space === 1 && lvl.secret);
+      const viewMaze = inSecret ? lvl.secret.maze : lvl.maze;
+      const chestDefs = inSecret ? (lvl.secret.chests || []) : (lvl.chests || []);
+      const mySpace = meNow ? (meNow.space || 0) : 0;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const stoneImg = imgReady.stone;
       const stoneOk = stoneImg && stoneImg.complete && stoneImg.naturalWidth > 0;
 
       for (let y = 0; y < world.grid_h; y++) {
-        const row = lvl.maze[y];
+        const row = viewMaze[y];
         if (!row) continue;
         for (let x = 0; x < world.grid_w; x++) {
           const px = x * tileSize, py = y * tileSize;
           const cell = row[x];
-          if (cell === 0 || cell === secretTile) {
+          // И обычная стена, и невидимый проход рисуются одинаково — как камень.
+          if (cell === 0) {
             if (stoneOk) ctx.drawImage(stoneImg, px, py, tileSize + 0.6, tileSize + 0.6);
             else {
               ctx.fillStyle = "#3a3a44";
               ctx.fillRect(px, py, tileSize, tileSize);
-            }
-            if (cell === secretTile) {
-              ctx.fillStyle = "rgba(0,0,0,0.38)";
-              ctx.fillRect(px, py, tileSize, tileSize);
-              const horizontal = tileOpen(lvl.maze, x - 1, y) || tileOpen(lvl.maze, x + 1, y);
-              ctx.fillStyle = "#07070b";
-              const gap = Math.max(3, tileSize * 0.28);
-              if (horizontal) {
-                ctx.fillRect(px + (tileSize - gap) / 2, py + tileSize * 0.12, gap, tileSize * 0.76);
-              } else {
-                ctx.fillRect(px + tileSize * 0.12, py + (tileSize - gap) / 2, tileSize * 0.76, gap);
-              }
             }
           } else {
             ctx.fillStyle = "#1a1a22";
@@ -575,33 +581,35 @@
         }
       }
 
-      const piles = pilesState[myLevel] || [];
-      const pileMap = {};
-      piles.forEach((d) => (pileMap[d.id] = d));
-      const diamondImg = imgReady.diamond;
-      (lvl.diamond_piles || []).forEach((d) => {
-        const st = pileMap[d.id];
-        if (st && st.collected) return;
-        const cx = d.x * tileSize + tileSize / 2, cy = d.y * tileSize + tileSize / 2;
-        const dSize = tileSize * 0.34;
-        pileOffsets(d).forEach((o) => {
-          const dx = cx + o.dx * tileSize * 2, dy = cy + o.dy * tileSize * 2;
-          if (diamondImg && diamondImg.complete && diamondImg.naturalWidth > 0) {
-            ctx.drawImage(diamondImg, dx - dSize / 2, dy - dSize / 2, dSize, dSize);
-          } else {
-            ctx.fillStyle = "#ff8fd0";
-            ctx.beginPath();
-            ctx.arc(dx, dy, dSize / 2, 0, Math.PI * 2);
-            ctx.fill();
-          }
+      if (!inSecret) {
+        const piles = pilesState[myLevel] || [];
+        const pileMap = {};
+        piles.forEach((d) => (pileMap[d.id] = d));
+        const diamondImg = imgReady.diamond;
+        (lvl.diamond_piles || []).forEach((d) => {
+          const st = pileMap[d.id];
+          if (st && st.collected) return;
+          const cx = d.x * tileSize + tileSize / 2, cy = d.y * tileSize + tileSize / 2;
+          const dSize = tileSize * 0.34;
+          pileOffsets(d).forEach((o) => {
+            const dx = cx + o.dx * tileSize * 2, dy = cy + o.dy * tileSize * 2;
+            if (diamondImg && diamondImg.complete && diamondImg.naturalWidth > 0) {
+              ctx.drawImage(diamondImg, dx - dSize / 2, dy - dSize / 2, dSize, dSize);
+            } else {
+              ctx.fillStyle = "#ff8fd0";
+              ctx.beginPath();
+              ctx.arc(dx, dy, dSize / 2, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          });
         });
-      });
+      }
 
-      const chests = chestsState[myLevel] || [];
+      const chests = (inSecret ? secretChestsState[myLevel] : chestsState[myLevel]) || [];
       const chestMap = {};
       chests.forEach((c) => (chestMap[c.id] = c));
       const chestImg = imgReady.chest;
-      (lvl.chests || []).forEach((c) => {
+      chestDefs.forEach((c) => {
         const st = chestMap[c.id] || { opened: false, progress: 0 };
         if (st.opened) return;
         const cx = c.x * tileSize + tileSize / 2, cy = c.y * tileSize + tileSize / 2;
@@ -622,10 +630,9 @@
         }
       });
 
-      if (iAmThief && players[myId] && players[myId].level === myLevel) {
-        const me = players[myId];
+      if (iAmThief && meNow && meNow.level === myLevel) {
         const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
-        const centerX = me.x * scale + hitboxSize / 2, centerY = me.y * scale + hitboxSize / 2;
+        const centerX = meNow.x * scale + hitboxSize / 2, centerY = meNow.y * scale + hitboxSize / 2;
         const rangePx = (world.steal_range || 72) * scale;
         ctx.beginPath();
         ctx.arc(centerX, centerY, rangePx, 0, Math.PI * 2);
@@ -637,7 +644,7 @@
       }
 
       Object.values(players).forEach((p) => {
-        if (p.level !== myLevel || !p.connected) return;
+        if (p.level !== myLevel || (p.space || 0) !== mySpace || !p.connected) return;
         const hitboxSize = tileSize * PLAYER_SIZE_RATIO;
         const px = p.x * scale, py = p.y * scale;
         const centerX = px + hitboxSize / 2, centerY = py + hitboxSize / 2;
