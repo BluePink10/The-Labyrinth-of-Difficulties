@@ -28,15 +28,12 @@ from fastapi.responses import FileResponse
 # ==========================================================
 MAZE_W = 9                     # ширина лабиринта в "ячейках" (не тайлах)
 MAZE_H = 9
-BASE_GRID_W = MAZE_W * 2 + 1   # сетка самого лабиринта, без полей
-BASE_GRID_H = MAZE_H * 2 + 1
-# Поля вокруг лабиринта: в них вырезаются тайные ниши с сундуками.
-# Внешняя рамка при этом остаётся сплошной стеной (кроме лестниц между этажами).
-SECRET_MARGIN = 2
-SECRETS_PER_LEVEL = 2
-GRID_W = BASE_GRID_W + 2 * SECRET_MARGIN
-GRID_H = BASE_GRID_H + 2 * SECRET_MARGIN
+GRID_W = MAZE_W * 2 + 1        # 19 тайлов
+GRID_H = MAZE_H * 2 + 1
 NUM_LEVELS = 3
+# Сколько невидимых входов на этаж. Все они ведут в одну и ту же тайную комнату.
+HIDDEN_PORTALS_PER_LEVEL = 2
+SECRET_CHESTS = 2
 
 TILE = 40                      # логический размер тайла (пиксели "игрового мира")
 WORLD_W = GRID_W * TILE
@@ -53,10 +50,10 @@ CHEST_DECAY_MULT = 1.6
 STEAL_COOLDOWN_MS = 9000
 STEAL_RANGE = TILE * 1.8
 
-# Клетка лабиринта: 0 — стена, 1 — пол, 2 — тайная дверь (проходима, но выглядит как трещина).
+# Клетка лабиринта: 0 — стена, 1 — пол.
+# Тайный проход — обычная стена (0). Клиент её никак не выделяет.
 WALL = 0
 FLOOR = 1
-SECRET_DOOR = 2
 
 # Аватарки — идентификаторы спрайтов static/assets/<id>.png (1..8)
 AVATARS = [str(i) for i in range(1, 9)]
@@ -132,99 +129,114 @@ def get_dead_ends(maze):
     return dead_ends
 
 
-def embed_maze(base_maze, base_exit_x, is_top_open, is_bot_open):
-    """Кладёт лабиринт в центр большей сетки, оставляя кольцо стен под тайники.
+def floor_neighbors(maze, x, y):
+    found = []
+    h, w = len(maze), len(maze[0])
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        ny, nx = y + dy, x + dx
+        if 0 <= ny < h and 0 <= nx < w and maze[ny][nx] == FLOOR:
+            found.append((nx, ny))
+    return found
 
-    Лестницы между этажами продлеваются сквозь поле до внешнего края —
-    только в колонке выхода и только если эта сторона этажа открыта.
+
+def pick_hidden_portals(maze, exit_x, count, blocked=None):
+    """Внутренние стены с одним соседним полом. На карте это обычные стены.
+
+    В такую стену можно упереться из коридора — сервер переносит игрока.
+    blocked — клетки, которые нельзя делать проходом (например, стена за сундуком).
     """
-    bh = len(base_maze)
-    bw = len(base_maze[0])
-    maze = [[WALL] * GRID_W for _ in range(GRID_H)]
-    for y in range(bh):
-        for x in range(bw):
-            maze[y + SECRET_MARGIN][x + SECRET_MARGIN] = base_maze[y][x]
-
-    exit_x = base_exit_x + SECRET_MARGIN
-    if is_top_open:
-        for y in range(0, SECRET_MARGIN + 1):
-            maze[y][exit_x] = FLOOR
-    if is_bot_open:
-        for y in range(GRID_H - SECRET_MARGIN - 1, GRID_H):
-            maze[y][exit_x] = FLOOR
-    return maze, exit_x
-
-
-def carve_secret_rooms(maze, exit_x):
-    """Вырезает короткие тайные проходы, каждый ведёт ровно в одну нишу с сундуком.
-
-    Проход не пробивает внешнюю стену и не соединяет два коридора между собой:
-    дверь (клетка 2) стоит в старой рамке лабиринта, сундук — в клетке поля за ней.
-    """
-    m = SECRET_MARGIN
+    blocked = blocked or set()
     candidates = []
-
-    def consider(door_x, door_y, room_x, room_y):
-        if not (0 < room_x < GRID_W - 1 and 0 < room_y < GRID_H - 1):
-            return
-        if maze[door_y][door_x] != WALL or maze[room_y][room_x] != WALL:
-            return
-        # Ниша не должна касаться уже существующего пола (иначе это дырка-короткий путь
-        # или второй выход с этажа), кроме самой двери.
-        for ny, nx in (
-            (room_y - 1, room_x),
-            (room_y + 1, room_x),
-            (room_y, room_x - 1),
-            (room_y, room_x + 1),
-        ):
-            if (nx, ny) == (door_x, door_y):
+    h, w = len(maze), len(maze[0])
+    for y in range(1, h - 1):
+        for x in range(1, w - 1):
+            if maze[y][x] != WALL or (x, y) in blocked:
                 continue
-            if maze[ny][nx] != WALL:
-                return
-        fx = door_x + (door_x - room_x)
-        fy = door_y + (door_y - room_y)
-        if not (0 <= fx < GRID_W and 0 <= fy < GRID_H):
-            return
-        if maze[fy][fx] != FLOOR:
-            return
-        # Не трогаем колонку лестницы и клетки рядом с ней.
-        if abs(door_x - exit_x) <= 1 or abs(room_x - exit_x) <= 1:
-            return
-        candidates.append((door_x, door_y, room_x, room_y))
-
-    for y in range(m + 1, GRID_H - m - 1):
-        consider(m, y, m - 1, y)                          # левая рамка
-        consider(GRID_W - m - 1, y, GRID_W - m, y)        # правая рамка
-    for x in range(m + 1, GRID_W - m - 1):
-        consider(x, m, x, m - 1)                          # верхняя рамка
-        consider(x, GRID_H - m - 1, x, GRID_H - m)        # нижняя рамка
-
+            if exit_x is not None and abs(x - exit_x) <= 1:
+                continue
+            floors = floor_neighbors(maze, x, y)
+            if len(floors) != 1:
+                continue
+            candidates.append({"x": x, "y": y, "floor": floors[0]})
     random.shuffle(candidates)
     picked = []
-    for door_x, door_y, room_x, room_y in candidates:
-        if len(picked) >= SECRETS_PER_LEVEL:
+    for c in candidates:
+        if len(picked) >= count:
             break
-        if any(abs(room_x - px) + abs(room_y - py) <= 1 for _, _, px, py in picked):
+        if any(abs(c["x"] - p["x"]) + abs(c["y"] - p["y"]) < 5 for p in picked):
             continue
-        # Повторная проверка: предыдущая ниша могла занять соседнюю клетку.
-        if maze[door_y][door_x] != WALL or maze[room_y][room_x] != WALL:
-            continue
-        maze[door_y][door_x] = SECRET_DOOR
-        maze[room_y][room_x] = FLOOR
-        picked.append((door_x, door_y, room_x, room_y))
-    return [(room_x, room_y) for _, _, room_x, room_y in picked]
+        picked.append(c)
+    if len(picked) < count:
+        for c in candidates:
+            if all(c["x"] != p["x"] or c["y"] != p["y"] for p in picked):
+                picked.append(c)
+            if len(picked) >= count:
+                break
+    return picked
+
+
+def generate_secret_room(level_index):
+    """Второй лабиринт того же размера, без лестниц. Сундуки стоят здесь.
+
+    Игроки с основного этажа эту комнату не видят и сами отсюда не видны:
+    это не ниша сбоку, а перенос в другое пространство.
+    """
+    maze, _ = generate_ellers_maze(MAZE_W, MAZE_H, False, False)
+    dead_ends = get_dead_ends(maze)
+    random.shuffle(dead_ends)
+    chest_tiles = list(dead_ends[:SECRET_CHESTS])
+    if len(chest_tiles) < SECRET_CHESTS:
+        for y in range(1, GRID_H - 1):
+            for x in range(1, GRID_W - 1):
+                if maze[y][x] == FLOOR and (x, y) not in chest_tiles:
+                    chest_tiles.append((x, y))
+                if len(chest_tiles) >= SECRET_CHESTS:
+                    break
+            if len(chest_tiles) >= SECRET_CHESTS:
+                break
+
+    blocked_spawn = set(chest_tiles)
+    floors = [
+        (x, y)
+        for y in range(GRID_H)
+        for x in range(GRID_W)
+        if maze[y][x] == FLOOR and (x, y) not in blocked_spawn
+    ]
+    cx, cy = GRID_W // 2, GRID_H // 2
+    floors.sort(key=lambda t: abs(t[0] - cx) + abs(t[1] - cy))
+    spawn = floors[0] if floors else next(
+        (x, y) for y in range(GRID_H) for x in range(GRID_W) if maze[y][x] == FLOOR
+    )
+
+    # Стены тупиков с сундуками не делаем выходом, чтобы открытие сундука
+    # не выкидывало из комнаты.
+    blocked = set()
+    for x, y in chest_tiles:
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            blocked.add((x + dx, y + dy))
+    portals = pick_hidden_portals(maze, None, 1, blocked)
+    if not portals:
+        portals = pick_hidden_portals(maze, None, 1)
+    ret = portals[0]
+
+    chests = [
+        {"id": f"s{level_index}_{i}", "x": x, "y": y, "opened": False, "progress": 0, "secret": True}
+        for i, (x, y) in enumerate(chest_tiles)
+    ]
+    return {
+        "maze": maze,
+        "chests": chests,
+        "spawn": {"x": spawn[0], "y": spawn[1]},
+        "return_portal": {"x": ret["x"], "y": ret["y"]},
+    }
 
 
 def generate_level_data(level_index):
     is_top_open = level_index > 0
     is_bot_open = level_index < NUM_LEVELS - 1
-    base_maze, base_exit_x = generate_ellers_maze(MAZE_W, MAZE_H, is_top_open, is_bot_open)
-    dead_ends = get_dead_ends(base_maze)
+    maze, exit_x = generate_ellers_maze(MAZE_W, MAZE_H, is_top_open, is_bot_open)
+    dead_ends = get_dead_ends(maze)
     random.shuffle(dead_ends)
-
-    maze, exit_x = embed_maze(base_maze, base_exit_x, is_top_open, is_bot_open)
-    dead_ends = [(x + SECRET_MARGIN, y + SECRET_MARGIN) for x, y in dead_ends]
-    secret_tiles = carve_secret_rooms(maze, exit_x)
 
     chests_count = min(3, len(dead_ends))
     chest_tiles = dead_ends[:chests_count]
@@ -234,10 +246,6 @@ def generate_level_data(level_index):
         {"id": f"c{level_index}_{i}", "x": cx, "y": cy, "opened": False, "progress": 0, "secret": False}
         for i, (cx, cy) in enumerate(chest_tiles)
     ]
-    chests.extend(
-        {"id": f"s{level_index}_{i}", "x": cx, "y": cy, "opened": False, "progress": 0, "secret": True}
-        for i, (cx, cy) in enumerate(secret_tiles)
-    )
 
     diamond_piles = []
     for i, (dx, dy) in enumerate(diamond_tiles):
@@ -249,7 +257,24 @@ def generate_level_data(level_index):
                 "collected": False,
             })
 
-    return {"maze": maze, "exit_x": exit_x, "chests": chests, "diamond_piles": diamond_piles}
+    # Не ставим проход в стену прямо за сундуком: игрок упирается туда, когда открывает его.
+    blocked = set()
+    for x, y in chest_tiles:
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            blocked.add((x + dx, y + dy))
+    portals = pick_hidden_portals(maze, exit_x, HIDDEN_PORTALS_PER_LEVEL, blocked)
+    if not portals:
+        portals = pick_hidden_portals(maze, exit_x, 1)
+
+    secret = generate_secret_room(level_index)
+    return {
+        "maze": maze,
+        "exit_x": exit_x,
+        "chests": chests,
+        "diamond_piles": diamond_piles,
+        "portals": portals,
+        "secret": secret,
+    }
 
 
 # ==========================================================
@@ -273,9 +298,15 @@ class Player:
         self.is_thief = False
 
         self.level = 0
+        self.space = 0            # 0 — основной лабиринт, 1 — тайная комната этого этажа
         self.x = 0.0
         self.y = 0.0
         self.diamonds = 0
+        self.return_floor = None  # (tx, ty) пола, откуда зашли в тайную комнату
+        self.return_portal = None
+        self.suppress_portal = None  # стена, в которую сейчас упираемся — не переносить повторно
+        self.suppress_input = None
+        self.portal_lock_ms = 0
 
         self.input = {"up": False, "down": False, "left": False, "right": False}
         self.action_held = False
@@ -285,19 +316,22 @@ class Player:
 
     def spawn(self, level_data_list, level_index, at_top):
         self.level = level_index
+        self.space = 0
+        self.return_floor = None
+        self.return_portal = None
+        self.suppress_portal = None
+        self.suppress_input = None
+        self.portal_lock_ms = 0
         exit_x = level_data_list[level_index]["exit_x"]
-        # Спавн внутри лабиринта, у лестницы, а не в поле тайников и не в стене.
-        if at_top:
-            ty = SECRET_MARGIN + 1
-        else:
-            ty = GRID_H - SECRET_MARGIN - 2
+        ty = 1 if at_top else GRID_H - 2
         self.x = exit_x * TILE + (TILE - PLAYER_SIZE) / 2
         self.y = ty * TILE + (TILE - PLAYER_SIZE) / 2
 
     def public_dict(self):
         return {
             "id": self.id, "name": self.name, "avatar": self.avatar,
-            "level": self.level, "x": round(self.x, 1), "y": round(self.y, 1),
+            "level": self.level, "space": self.space,
+            "x": round(self.x, 1), "y": round(self.y, 1),
             "diamonds": self.diamonds, "opening": self.is_opening,
             "steal_cd": self.steal_cd_ms, "connected": self.connected,
         }
@@ -381,14 +415,23 @@ class Room:
             p.diamonds = 0
             p.steal_cd_ms = 0
             p.vote = None
+            p.space = 0
             p.spawn(self.levels, 0, at_top=True)
         self.state = "ROLE"
         self.timer = GAME_DURATION
 
         static_levels = [
-            {"maze": lvl["maze"], "exit_x": lvl["exit_x"],
-             "chests": [{"id": c["id"], "x": c["x"], "y": c["y"], "secret": c["secret"]} for c in lvl["chests"]],
-             "diamond_piles": [{"id": d["id"], "x": d["x"], "y": d["y"], "count": d["count"]} for d in lvl["diamond_piles"]]}
+            {
+                "maze": lvl["maze"],
+                "exit_x": lvl["exit_x"],
+                "chests": [{"id": c["id"], "x": c["x"], "y": c["y"], "secret": False} for c in lvl["chests"]],
+                "diamond_piles": [{"id": d["id"], "x": d["x"], "y": d["y"], "count": d["count"]} for d in lvl["diamond_piles"]],
+                # Координаты проходов клиенту не отдаём — на карте их нет.
+                "secret": {
+                    "maze": lvl["secret"]["maze"],
+                    "chests": [{"id": c["id"], "x": c["x"], "y": c["y"], "secret": True} for c in lvl["secret"]["chests"]],
+                },
+            }
             for lvl in self.levels
         ]
         for p in self.players.values():
@@ -400,7 +443,7 @@ class Room:
                 "world": {
                     "tile": TILE, "grid_w": GRID_W, "grid_h": GRID_H,
                     "num_levels": NUM_LEVELS, "steal_range": STEAL_RANGE,
-                    "chest_open_ms": CHEST_OPEN_MS, "secret_tile": SECRET_DOOR,
+                    "chest_open_ms": CHEST_OPEN_MS,
                 },
                 "duration": GAME_DURATION,
             })
@@ -431,6 +474,8 @@ class Room:
         for p in self.alive_players():
             if p.steal_cd_ms > 0:
                 p.steal_cd_ms = max(0, p.steal_cd_ms - int(dt * 1000))
+            if p.portal_lock_ms > 0:
+                p.portal_lock_ms = max(0, p.portal_lock_ms - int(dt * 1000))
 
             dx = dy = 0.0
             if p.input["left"]:
@@ -445,68 +490,175 @@ class Room:
                 dx *= 0.7071
                 dy *= 0.7071
 
-            maze = self.levels[p.level]["maze"]
+            maze = self.active_maze(p)
             step = PLAYER_SPEED * dt
+            teleported = False
             if dx != 0:
                 nx = p.x + dx * step
                 if not self.collides(nx, p.y, maze):
                     p.x = nx
-            if dy != 0:
+                elif self.try_portal(p, nx, p.y, maze):
+                    teleported = True
+            if not teleported and dy != 0:
                 ny = p.y + dy * step
+                maze = self.active_maze(p)
                 if not self.collides(p.x, ny, maze):
                     p.y = ny
+                else:
+                    self.try_portal(p, p.x, ny, maze)
 
-            # переход между этажами
-            if p.y < -PLAYER_SIZE / 2 and p.level > 0:
-                p.level -= 1
-                p.spawn(self.levels, p.level, at_top=False)
-            elif p.y > WORLD_H - PLAYER_SIZE / 2 and p.level < NUM_LEVELS - 1:
-                p.level += 1
-                p.spawn(self.levels, p.level, at_top=True)
+            self.relax_portal_suppress(p)
 
-            # сбор алмазов
-            for pile in self.levels[p.level]["diamond_piles"]:
-                if pile["collected"]:
-                    continue
-                px, py = pile["x"] * TILE, pile["y"] * TILE
-                if rects_overlap(p.x, p.y, PLAYER_SIZE, PLAYER_SIZE, px, py, TILE, TILE):
-                    pile["collected"] = True
-                    p.diamonds += pile["count"]
+            # переход между этажами — только в основном лабиринте
+            if p.space == 0:
+                if p.y < -PLAYER_SIZE / 2 and p.level > 0:
+                    p.level -= 1
+                    p.spawn(self.levels, p.level, at_top=False)
+                elif p.y > WORLD_H - PLAYER_SIZE / 2 and p.level < NUM_LEVELS - 1:
+                    p.level += 1
+                    p.spawn(self.levels, p.level, at_top=True)
+            else:
+                p.x = min(max(0.0, p.x), WORLD_W - PLAYER_SIZE)
+                p.y = min(max(0.0, p.y), WORLD_H - PLAYER_SIZE)
 
-        # сундуки: раздельно по уровням, чтобы decay применялся честно
+            # сбор алмазов — только в основном лабиринте
+            if p.space == 0:
+                for pile in self.levels[p.level]["diamond_piles"]:
+                    if pile["collected"]:
+                        continue
+                    px, py = pile["x"] * TILE, pile["y"] * TILE
+                    if rects_overlap(p.x, p.y, PLAYER_SIZE, PLAYER_SIZE, px, py, TILE, TILE):
+                        pile["collected"] = True
+                        p.diamonds += pile["count"]
+
+        # сундуки: и основного лабиринта, и тайных комнат
         openers_by_chest = defaultdict(list)
         for p in self.alive_players():
             p.is_opening = False
         for p in self.alive_players():
             if not p.action_held:
                 continue
-            for chest in self.levels[p.level]["chests"]:
+            for chest in self.chests_for(p):
                 if chest["opened"]:
                     continue
                 cx, cy = chest["x"] * TILE, chest["y"] * TILE
                 if rects_overlap(p.x, p.y, PLAYER_SIZE, PLAYER_SIZE, cx - 8, cy - 8, TILE + 16, TILE + 16):
                     openers_by_chest[chest["id"]].append(p)
 
+        for chest in self.all_chests():
+            if chest["opened"]:
+                continue
+            openers = openers_by_chest.get(chest["id"], [])
+            if openers:
+                chest["progress"] += dt * 1000
+                for op in openers:
+                    op.is_opening = True
+                if chest["progress"] >= CHEST_OPEN_MS:
+                    chest["opened"] = True
+                    reward = random.randint(15, 25)
+                    winner = openers[0]
+                    winner.diamonds += reward
+                    self.events.append({"type": "chest", "player": winner.id, "amount": reward, "secret": chest["secret"]})
+            else:
+                chest["progress"] = max(0.0, chest["progress"] - dt * 1000 * CHEST_DECAY_MULT)
+
+    def active_maze(self, p):
+        lvl = self.levels[p.level]
+        if p.space == 1:
+            return lvl["secret"]["maze"]
+        return lvl["maze"]
+
+    def chests_for(self, p):
+        lvl = self.levels[p.level]
+        if p.space == 1:
+            return lvl["secret"]["chests"]
+        return lvl["chests"]
+
+    def all_chests(self):
         for lvl in self.levels:
             for chest in lvl["chests"]:
-                if chest["opened"]:
+                yield chest
+            for chest in lvl["secret"]["chests"]:
+                yield chest
+
+    def overlapping_walls(self, x, y, maze):
+        hit = []
+        left = int(x // TILE)
+        right = int((x + PLAYER_SIZE) // TILE)
+        top = int(y // TILE)
+        bottom = int((y + PLAYER_SIZE) // TILE)
+        for ty in range(max(0, top), min(GRID_H - 1, bottom) + 1):
+            for tx in range(max(0, left), min(GRID_W - 1, right) + 1):
+                if 0 <= ty < GRID_H and 0 <= tx < GRID_W and maze[ty][tx] == WALL:
+                    if rects_overlap(x, y, PLAYER_SIZE, PLAYER_SIZE, tx * TILE, ty * TILE, TILE, TILE):
+                        hit.append((tx, ty))
+        return hit
+
+    def try_portal(self, p, x, y, maze):
+        """Если упёрлись в невидимый проход — перенос, а не обычный удар о стену."""
+        if p.portal_lock_ms > 0:
+            return False
+        lvl = self.levels[p.level]
+        for tx, ty in self.overlapping_walls(x, y, maze):
+            if p.suppress_portal == (tx, ty):
+                continue
+            if p.space == 0:
+                entrance = next((port for port in lvl["portals"] if port["x"] == tx and port["y"] == ty), None)
+                if entrance is None:
                     continue
-                openers = openers_by_chest.get(chest["id"], [])
-                if openers:
-                    chest["progress"] += dt * 1000
-                    for op in openers:
-                        op.is_opening = True
-                    if chest["progress"] >= CHEST_OPEN_MS:
-                        chest["opened"] = True
-                        reward = random.randint(15, 25)
-                        winner = openers[0]
-                        winner.diamonds += reward
-                        self.events.append({"type": "chest", "player": winner.id, "amount": reward, "secret": chest["secret"]})
+                secret = lvl["secret"]
+                p.return_floor = entrance["floor"]
+                p.return_portal = (entrance["x"], entrance["y"])
+                p.suppress_portal = None
+                p.suppress_input = None
+                p.space = 1
+                sp = secret["spawn"]
+                p.x = sp["x"] * TILE + (TILE - PLAYER_SIZE) / 2
+                p.y = sp["y"] * TILE + (TILE - PLAYER_SIZE) / 2
+            else:
+                rp = lvl["secret"]["return_portal"]
+                if (tx, ty) != (rp["x"], rp["y"]):
+                    continue
+                if p.return_floor:
+                    fx, fy = p.return_floor
                 else:
-                    chest["progress"] = max(0.0, chest["progress"] - dt * 1000 * CHEST_DECAY_MULT)
+                    fx, fy = lvl["portals"][0]["floor"]
+                back = p.return_portal
+                p.space = 0
+                p.x = fx * TILE + (TILE - PLAYER_SIZE) / 2
+                p.y = fy * TILE + (TILE - PLAYER_SIZE) / 2
+                # Пока зажато то же направление, эта стена снова обычная,
+                # чтобы игрока не затянуло назад сразу после выхода.
+                p.suppress_portal = back
+                p.suppress_input = (
+                    p.input["up"], p.input["down"], p.input["left"], p.input["right"],
+                )
+                p.return_floor = None
+                p.return_portal = None
+            p.portal_lock_ms = 350
+            return True
+        return False
+
+    def relax_portal_suppress(self, p):
+        """Снять запрет, когда игрок сменил направление или отошёл."""
+        if not p.suppress_portal:
+            return
+        if p.space != 0:
+            p.suppress_portal = None
+            p.suppress_input = None
+            return
+        sx, sy = p.suppress_portal
+        pcx = sx * TILE + TILE / 2
+        pcy = sy * TILE + TILE / 2
+        mx = p.x + PLAYER_SIZE / 2
+        my = p.y + PLAYER_SIZE / 2
+        dist = ((pcx - mx) ** 2 + (pcy - my) ** 2) ** 0.5
+        cur = (p.input["up"], p.input["down"], p.input["left"], p.input["right"])
+        if dist > TILE * 1.8 or cur != p.suppress_input:
+            p.suppress_portal = None
+            p.suppress_input = None
 
     def collides(self, x, y, maze):
-        # Стена — только клетка 0. Тайная дверь (2) проходима, как обычный пол.
         left = int(x // TILE)
         right = int((x + PLAYER_SIZE) // TILE)
         top = int(y // TILE)
@@ -523,7 +675,7 @@ class Room:
             return
         best, best_dist = None, None
         for other in self.alive_players():
-            if other.id == thief.id or other.level != thief.level:
+            if other.id == thief.id or other.level != thief.level or other.space != thief.space:
                 continue
             dist = ((other.x - thief.x) ** 2 + (other.y - thief.y) ** 2) ** 0.5
             if dist <= STEAL_RANGE and other.diamonds > 0:
@@ -548,11 +700,16 @@ class Room:
             [{"id": d["id"], "collected": d["collected"]} for d in lvl["diamond_piles"]]
             for lvl in self.levels
         ]
+        secret_chests = [
+            [{"id": c["id"], "opened": c["opened"], "progress": c["progress"]} for c in lvl["secret"]["chests"]]
+            for lvl in self.levels
+        ]
         snap = {
             "type": "state",
             "timer": round(self.timer, 1),
             "players": [p.public_dict() for p in self.players.values()],
             "chests": chests_by_level,
+            "secret_chests": secret_chests,
             "diamond_piles": piles_by_level,
             "events": self.events,
         }
