@@ -4,12 +4,17 @@ Thief & Innocents — web multiplayer backend.
 От 3 до 8 игроков в комнате: 1 вор + остальные мирные жители.
 Сервер авторитетен: хранит состояние комнаты, считает физику,
 и рассылает снимки состояния всем клиентам по WebSocket.
+
+Запуск локально:
+    pip install -r requirements.txt
+    uvicorn app:app --host 0.0.0.0 --port 7860
 """
 
 import asyncio
 import json
 import random
 import string
+import traceback
 import uuid
 from collections import defaultdict
 from typing import Optional
@@ -17,52 +22,65 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 # ==========================================================
 # Игровые константы
 # ==========================================================
-MAZE_W = 9
+MAZE_W = 9                     # ширина лабиринта в "ячейках" (не тайлах)
 MAZE_H = 9
-GRID_W = MAZE_W * 2 + 1
-GRID_H = MAZE_H * 2 + 1
+BASE_GRID_W = MAZE_W * 2 + 1   # сетка самого лабиринта, без полей
+BASE_GRID_H = MAZE_H * 2 + 1
+# Поля вокруг лабиринта: в них вырезаются тайные ниши с сундуками.
+# Внешняя рамка при этом остаётся сплошной стеной (кроме лестниц между этажами).
+SECRET_MARGIN = 2
+SECRETS_PER_LEVEL = 2
+GRID_W = BASE_GRID_W + 2 * SECRET_MARGIN
+GRID_H = BASE_GRID_H + 2 * SECRET_MARGIN
 NUM_LEVELS = 3
 
-TILE = 40
+TILE = 40                      # логический размер тайла (пиксели "игрового мира")
 WORLD_W = GRID_W * TILE
 WORLD_H = GRID_H * TILE
 
 PLAYER_SIZE = TILE * 0.55
-PLAYER_SPEED = 190.0
-TICK_RATE = 20
+PLAYER_SPEED = 190.0           # логических единиц в секунду
+TICK_RATE = 20                 # обновлений в секунду
 DT = 1.0 / TICK_RATE
 
-GAME_DURATION = 210.0
+GAME_DURATION = 210.0          # секунд на раунд (3.5 мин)
 CHEST_OPEN_MS = 2200
 CHEST_DECAY_MULT = 1.6
 STEAL_COOLDOWN_MS = 9000
 STEAL_RANGE = TILE * 1.8
 
+# Клетка лабиринта: 0 — стена, 1 — пол, 2 — тайная дверь (проходима, но выглядит как трещина).
+WALL = 0
+FLOOR = 1
+SECRET_DOOR = 2
+
+# Аватарки — идентификаторы спрайтов static/assets/<id>.png (1..8)
 AVATARS = [str(i) for i in range(1, 9)]
+# Размер комнаты: от 3 до 8 игроков (ограничено количеством аватарок —
+# каждому игроку достаётся уникальный персонаж).
 MIN_PLAYERS = 3
 MAX_PLAYERS = len(AVATARS)
 ROOM_CODE_CHARS = string.ascii_uppercase + string.digits
 
 
 # ==========================================================
-# Генерация лабиринта + Тайные комнаты
+# Генерация лабиринта (алгоритм Эллера) — логика из оригинала
 # ==========================================================
 def generate_ellers_maze(width, height, is_top_open, is_bottom_open):
     grid_width = width * 2 + 1
     grid_height = height * 2 + 1
-    maze = [[0] * grid_width for _ in range(grid_height)]
+    maze = [[WALL] * grid_width for _ in range(grid_height)]
     current_row_sets = list(range(width))
     next_set_id = width
 
     for y_idx in range(height):
         grid_y = y_idx * 2 + 1
         for x_idx in range(width):
-            maze[grid_y][x_idx * 2 + 1] = 1
+            maze[grid_y][x_idx * 2 + 1] = FLOOR
 
         for x_idx in range(width - 1):
             grid_x = x_idx * 2 + 1
@@ -73,7 +91,7 @@ def generate_ellers_maze(width, height, is_top_open, is_bottom_open):
                     for i in range(width):
                         if current_row_sets[i] == old_set:
                             current_row_sets[i] = new_set
-                    maze[grid_y][grid_x + 1] = 1
+                    maze[grid_y][grid_x + 1] = FLOOR
 
         if y_idx < height - 1:
             next_row_sets = [None] * width
@@ -86,7 +104,7 @@ def generate_ellers_maze(width, height, is_top_open, is_bottom_open):
                 downs = random.sample(indices, num_downs)
                 for x_idx in downs:
                     grid_x = x_idx * 2 + 1
-                    maze[grid_y + 1][grid_x] = 1
+                    maze[grid_y + 1][grid_x] = FLOOR
                     next_row_sets[x_idx] = s_id
 
             for x_idx in range(width):
@@ -97,9 +115,9 @@ def generate_ellers_maze(width, height, is_top_open, is_bottom_open):
 
     mid_x = (grid_width // 2) if (grid_width // 2) % 2 == 1 else (grid_width // 2) - 1
     if is_top_open:
-        maze[0][mid_x] = 1
+        maze[0][mid_x] = FLOOR
     if is_bottom_open:
-        maze[grid_height - 1][mid_x] = 1
+        maze[grid_height - 1][mid_x] = FLOOR
     return maze, mid_x
 
 
@@ -107,38 +125,119 @@ def get_dead_ends(maze):
     dead_ends = []
     for y in range(1, len(maze) - 1):
         for x in range(1, len(maze[0]) - 1):
-            if maze[y][x] == 1:
+            if maze[y][x] == FLOOR:
                 neighbors = [maze[y - 1][x], maze[y + 1][x], maze[y][x - 1], maze[y][x + 1]]
-                if neighbors.count(0) == 3:
+                if neighbors.count(WALL) == 3:
                     dead_ends.append((x, y))
     return dead_ends
+
+
+def embed_maze(base_maze, base_exit_x, is_top_open, is_bot_open):
+    """Кладёт лабиринт в центр большей сетки, оставляя кольцо стен под тайники.
+
+    Лестницы между этажами продлеваются сквозь поле до внешнего края —
+    только в колонке выхода и только если эта сторона этажа открыта.
+    """
+    bh = len(base_maze)
+    bw = len(base_maze[0])
+    maze = [[WALL] * GRID_W for _ in range(GRID_H)]
+    for y in range(bh):
+        for x in range(bw):
+            maze[y + SECRET_MARGIN][x + SECRET_MARGIN] = base_maze[y][x]
+
+    exit_x = base_exit_x + SECRET_MARGIN
+    if is_top_open:
+        for y in range(0, SECRET_MARGIN + 1):
+            maze[y][exit_x] = FLOOR
+    if is_bot_open:
+        for y in range(GRID_H - SECRET_MARGIN - 1, GRID_H):
+            maze[y][exit_x] = FLOOR
+    return maze, exit_x
+
+
+def carve_secret_rooms(maze, exit_x):
+    """Вырезает короткие тайные проходы, каждый ведёт ровно в одну нишу с сундуком.
+
+    Проход не пробивает внешнюю стену и не соединяет два коридора между собой:
+    дверь (клетка 2) стоит в старой рамке лабиринта, сундук — в клетке поля за ней.
+    """
+    m = SECRET_MARGIN
+    candidates = []
+
+    def consider(door_x, door_y, room_x, room_y):
+        if not (0 < room_x < GRID_W - 1 and 0 < room_y < GRID_H - 1):
+            return
+        if maze[door_y][door_x] != WALL or maze[room_y][room_x] != WALL:
+            return
+        # Ниша не должна касаться уже существующего пола (иначе это дырка-короткий путь
+        # или второй выход с этажа), кроме самой двери.
+        for ny, nx in (
+            (room_y - 1, room_x),
+            (room_y + 1, room_x),
+            (room_y, room_x - 1),
+            (room_y, room_x + 1),
+        ):
+            if (nx, ny) == (door_x, door_y):
+                continue
+            if maze[ny][nx] != WALL:
+                return
+        fx = door_x + (door_x - room_x)
+        fy = door_y + (door_y - room_y)
+        if not (0 <= fx < GRID_W and 0 <= fy < GRID_H):
+            return
+        if maze[fy][fx] != FLOOR:
+            return
+        # Не трогаем колонку лестницы и клетки рядом с ней.
+        if abs(door_x - exit_x) <= 1 or abs(room_x - exit_x) <= 1:
+            return
+        candidates.append((door_x, door_y, room_x, room_y))
+
+    for y in range(m + 1, GRID_H - m - 1):
+        consider(m, y, m - 1, y)                          # левая рамка
+        consider(GRID_W - m - 1, y, GRID_W - m, y)        # правая рамка
+    for x in range(m + 1, GRID_W - m - 1):
+        consider(x, m, x, m - 1)                          # верхняя рамка
+        consider(x, GRID_H - m - 1, x, GRID_H - m)        # нижняя рамка
+
+    random.shuffle(candidates)
+    picked = []
+    for door_x, door_y, room_x, room_y in candidates:
+        if len(picked) >= SECRETS_PER_LEVEL:
+            break
+        if any(abs(room_x - px) + abs(room_y - py) <= 1 for _, _, px, py in picked):
+            continue
+        # Повторная проверка: предыдущая ниша могла занять соседнюю клетку.
+        if maze[door_y][door_x] != WALL or maze[room_y][room_x] != WALL:
+            continue
+        maze[door_y][door_x] = SECRET_DOOR
+        maze[room_y][room_x] = FLOOR
+        picked.append((door_x, door_y, room_x, room_y))
+    return [(room_x, room_y) for _, _, room_x, room_y in picked]
 
 
 def generate_level_data(level_index):
     is_top_open = level_index > 0
     is_bot_open = level_index < NUM_LEVELS - 1
-    maze, exit_x = generate_ellers_maze(MAZE_W, MAZE_H, is_top_open, is_bot_open)
-    dead_ends = get_dead_ends(maze)
+    base_maze, base_exit_x = generate_ellers_maze(MAZE_W, MAZE_H, is_top_open, is_bot_open)
+    dead_ends = get_dead_ends(base_maze)
     random.shuffle(dead_ends)
 
-    for _ in range(min(2, len(dead_ends))):
-        if not dead_ends:
-            break
-        cx, cy = dead_ends.pop()
-        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nx, ny = cx + dx, cy + dy
-            if 0 <= ny < GRID_H and 0 <= nx < GRID_W and maze[ny][nx] == 0:
-                maze[ny][nx] = 1
-                break
+    maze, exit_x = embed_maze(base_maze, base_exit_x, is_top_open, is_bot_open)
+    dead_ends = [(x + SECRET_MARGIN, y + SECRET_MARGIN) for x, y in dead_ends]
+    secret_tiles = carve_secret_rooms(maze, exit_x)
 
     chests_count = min(3, len(dead_ends))
     chest_tiles = dead_ends[:chests_count]
     diamond_tiles = dead_ends[chests_count:]
 
     chests = [
-        {"id": f"c{level_index}_{i}", "x": cx, "y": cy, "opened": False, "progress": 0}
+        {"id": f"c{level_index}_{i}", "x": cx, "y": cy, "opened": False, "progress": 0, "secret": False}
         for i, (cx, cy) in enumerate(chest_tiles)
     ]
+    chests.extend(
+        {"id": f"s{level_index}_{i}", "x": cx, "y": cy, "opened": False, "progress": 0, "secret": True}
+        for i, (cx, cy) in enumerate(secret_tiles)
+    )
 
     diamond_piles = []
     for i, (dx, dy) in enumerate(diamond_tiles):
@@ -153,12 +252,15 @@ def generate_level_data(level_index):
     return {"maze": maze, "exit_x": exit_x, "chests": chests, "diamond_piles": diamond_piles}
 
 
+# ==========================================================
+# Вспомогательная физика (прямоугольники в логических пикселях)
+# ==========================================================
 def rects_overlap(ax, ay, aw, ah, bx, by, bw, bh):
     return ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
 
 
 # ==========================================================
-# Игрок и Комната
+# Игрок (серверное состояние)
 # ==========================================================
 class Player:
     def __init__(self, pid, name, avatar, ws):
@@ -167,7 +269,7 @@ class Player:
         self.avatar = avatar if avatar in AVATARS else AVATARS[0]
         self.ws = ws
         self.connected = True
-        self.ready = False
+        self.ready = False       # готов после экрана роли
         self.is_thief = False
 
         self.level = 0
@@ -184,7 +286,11 @@ class Player:
     def spawn(self, level_data_list, level_index, at_top):
         self.level = level_index
         exit_x = level_data_list[level_index]["exit_x"]
-        ty = 1 if at_top else GRID_H - 2
+        # Спавн внутри лабиринта, у лестницы, а не в поле тайников и не в стене.
+        if at_top:
+            ty = SECRET_MARGIN + 1
+        else:
+            ty = GRID_H - SECRET_MARGIN - 2
         self.x = exit_x * TILE + (TILE - PLAYER_SIZE) / 2
         self.y = ty * TILE + (TILE - PLAYER_SIZE) / 2
 
@@ -197,16 +303,19 @@ class Player:
         }
 
 
+# ==========================================================
+# Комната
+# ==========================================================
 class Room:
     def __init__(self, code, max_players=MIN_PLAYERS):
         self.code = code
         self.max_players = max(MIN_PLAYERS, min(MAX_PLAYERS, max_players))
         self.players: dict[str, Player] = {}
         self.host_id: Optional[str] = None
-        self.state = "LOBBY"
+        self.state = "LOBBY"   # LOBBY -> ROLE -> PLAY -> VOTE -> RESULT
         self.levels = []
         self.timer = GAME_DURATION
-        self.events = []
+        self.events = []       # временные события (кражи) для текущего тика
         self.loop_task: Optional[asyncio.Task] = None
         self.lock = asyncio.Lock()
         self.result = None
@@ -218,13 +327,14 @@ class Room:
         return {p.avatar for p in self.players.values() if p.id != exclude_id}
 
     def pick_avatar(self, requested, exclude_id=None):
+        """Вернуть requested, если он свободен, иначе первый свободный аватар."""
         taken = self.taken_avatars(exclude_id)
         if requested in AVATARS and requested not in taken:
             return requested
         for a in AVATARS:
             if a not in taken:
                 return a
-        return AVATARS[0]
+        return AVATARS[0]  # не должно происходить: MAX_PLAYERS <= len(AVATARS)
 
     async def broadcast(self, payload: dict):
         dead = []
@@ -258,7 +368,9 @@ class Room:
         }
 
     async def try_start_game(self):
-        if self.state != "LOBBY" or len(self.players) != self.max_players:
+        if self.state != "LOBBY":
+            return
+        if len(self.players) != self.max_players:
             return
         self.levels = [generate_level_data(i) for i in range(NUM_LEVELS)]
         pids = list(self.players.keys())
@@ -268,13 +380,14 @@ class Room:
             p.ready = False
             p.diamonds = 0
             p.steal_cd_ms = 0
+            p.vote = None
             p.spawn(self.levels, 0, at_top=True)
         self.state = "ROLE"
         self.timer = GAME_DURATION
 
         static_levels = [
             {"maze": lvl["maze"], "exit_x": lvl["exit_x"],
-             "chests": [{"id": c["id"], "x": c["x"], "y": c["y"]} for c in lvl["chests"]],
+             "chests": [{"id": c["id"], "x": c["x"], "y": c["y"], "secret": c["secret"]} for c in lvl["chests"]],
              "diamond_piles": [{"id": d["id"], "x": d["x"], "y": d["y"], "count": d["count"]} for d in lvl["diamond_piles"]]}
             for lvl in self.levels
         ]
@@ -284,8 +397,11 @@ class Room:
                 "you": p.id,
                 "is_thief": p.is_thief,
                 "levels": static_levels,
-                "world": {"tile": TILE, "grid_w": GRID_W, "grid_h": GRID_H,
-                          "num_levels": NUM_LEVELS, "steal_range": STEAL_RANGE},
+                "world": {
+                    "tile": TILE, "grid_w": GRID_W, "grid_h": GRID_H,
+                    "num_levels": NUM_LEVELS, "steal_range": STEAL_RANGE,
+                    "chest_open_ms": CHEST_OPEN_MS, "secret_tile": SECRET_DOOR,
+                },
                 "duration": GAME_DURATION,
             })
 
@@ -317,10 +433,14 @@ class Room:
                 p.steal_cd_ms = max(0, p.steal_cd_ms - int(dt * 1000))
 
             dx = dy = 0.0
-            if p.input["left"]: dx -= 1
-            if p.input["right"]: dx += 1
-            if p.input["up"]: dy -= 1
-            if p.input["down"]: dy += 1
+            if p.input["left"]:
+                dx -= 1
+            if p.input["right"]:
+                dx += 1
+            if p.input["up"]:
+                dy -= 1
+            if p.input["down"]:
+                dy += 1
             if dx != 0 and dy != 0:
                 dx *= 0.7071
                 dy *= 0.7071
@@ -336,6 +456,7 @@ class Room:
                 if not self.collides(p.x, ny, maze):
                     p.y = ny
 
+            # переход между этажами
             if p.y < -PLAYER_SIZE / 2 and p.level > 0:
                 p.level -= 1
                 p.spawn(self.levels, p.level, at_top=False)
@@ -343,48 +464,56 @@ class Room:
                 p.level += 1
                 p.spawn(self.levels, p.level, at_top=True)
 
+            # сбор алмазов
             for pile in self.levels[p.level]["diamond_piles"]:
-                if pile["collected"]: continue
+                if pile["collected"]:
+                    continue
                 px, py = pile["x"] * TILE, pile["y"] * TILE
                 if rects_overlap(p.x, p.y, PLAYER_SIZE, PLAYER_SIZE, px, py, TILE, TILE):
                     pile["collected"] = True
                     p.diamonds += pile["count"]
 
+        # сундуки: раздельно по уровням, чтобы decay применялся честно
         openers_by_chest = defaultdict(list)
         for p in self.alive_players():
             p.is_opening = False
         for p in self.alive_players():
-            if not p.action_held: continue
+            if not p.action_held:
+                continue
             for chest in self.levels[p.level]["chests"]:
-                if chest["opened"]: continue
+                if chest["opened"]:
+                    continue
                 cx, cy = chest["x"] * TILE, chest["y"] * TILE
                 if rects_overlap(p.x, p.y, PLAYER_SIZE, PLAYER_SIZE, cx - 8, cy - 8, TILE + 16, TILE + 16):
                     openers_by_chest[chest["id"]].append(p)
 
         for lvl in self.levels:
             for chest in lvl["chests"]:
-                if chest["opened"]: continue
+                if chest["opened"]:
+                    continue
                 openers = openers_by_chest.get(chest["id"], [])
                 if openers:
-                    chest["progress"] += DT * 1000
-                    for op in openers: op.is_opening = True
+                    chest["progress"] += dt * 1000
+                    for op in openers:
+                        op.is_opening = True
                     if chest["progress"] >= CHEST_OPEN_MS:
                         chest["opened"] = True
                         reward = random.randint(15, 25)
                         winner = openers[0]
                         winner.diamonds += reward
-                        self.events.append({"type": "chest", "player": winner.id, "amount": reward})
+                        self.events.append({"type": "chest", "player": winner.id, "amount": reward, "secret": chest["secret"]})
                 else:
-                    chest["progress"] = max(0.0, chest["progress"] - DT * 1000 * CHEST_DECAY_MULT)
+                    chest["progress"] = max(0.0, chest["progress"] - dt * 1000 * CHEST_DECAY_MULT)
 
     def collides(self, x, y, maze):
+        # Стена — только клетка 0. Тайная дверь (2) проходима, как обычный пол.
         left = int(x // TILE)
         right = int((x + PLAYER_SIZE) // TILE)
         top = int(y // TILE)
         bottom = int((y + PLAYER_SIZE) // TILE)
         for ty in range(max(0, top), min(GRID_H - 1, bottom) + 1):
             for tx in range(max(0, left), min(GRID_W - 1, right) + 1):
-                if maze[ty][tx] == 0:
+                if maze[ty][tx] == WALL:
                     if rects_overlap(x, y, PLAYER_SIZE, PLAYER_SIZE, tx * TILE, ty * TILE, TILE, TILE):
                         return True
         return False
@@ -442,6 +571,7 @@ class Room:
 
         thief = next(p for p in self.players.values() if p.is_thief)
         thief_votes = tally.get(thief.id, 0)
+        # Строгое большинство от числа проголосовавших (например, 2 из 3, 5 из 8).
         innocents_win = thief_votes > len(voters) / 2
 
         self.state = "RESULT"
@@ -449,13 +579,16 @@ class Room:
             "type": "result",
             "thief": {"id": thief.id, "name": thief.name, "avatar": thief.avatar},
             "votes": {pid: v for pid, v in ((p.id, p.vote) for p in self.players.values())},
-            "tally": tally,
-            "scores": [{"id": p.id, "name": p.name, "diamonds": p.diamonds} for p in self.players.values()],
+            "tally": dict(tally),
+            "scores": [{"id": p.id, "name": p.name, "avatar": p.avatar, "diamonds": p.diamonds} for p in self.players.values()],
             "innocents_win": innocents_win,
         }
         await self.broadcast(self.result)
 
 
+# ==========================================================
+# Менеджер комнат
+# ==========================================================
 rooms: dict[str, Room] = {}
 rooms_lock = asyncio.Lock()
 
@@ -467,12 +600,35 @@ def gen_room_code():
 app = FastAPI()
 
 
-class NoCacheForCodeMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        if request.url.path.endswith((".html", ".js", ".css")) or request.url.path == "/":
-            response.headers["Cache-Control"] = "no-cache, must-revalidate"
-        return response
+class NoCacheForCodeMiddleware:
+    """Чистый ASGI middleware.
+
+    BaseHTTPMiddleware из Starlette нельзя вешать на это приложение:
+    он заворачивает и WebSocket тоже, на рукопожатии сокета кидает
+    исключение, и клиент никогда не доходит до лобби — кнопки
+    «Создать» / «Войти» выглядят мёртвыми.
+    Здесь сокеты пропускаются как есть, заголовок кэша ставится только HTTP.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path") or ""
+        nocache = path == "/" or path.endswith((".html", ".js", ".css"))
+
+        async def send_wrapper(message):
+            if nocache and message["type"] == "http.response.start":
+                headers = [(k, v) for (k, v) in message.get("headers", []) if k.lower() != b"cache-control"]
+                headers.append((b"cache-control", b"no-cache, must-revalidate"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 app.add_middleware(NoCacheForCodeMiddleware)
@@ -576,10 +732,12 @@ async def ws_endpoint(websocket: WebSocket, room_code: str):
                 elif mtype == "vote":
                     if room.state == "VOTE":
                         target = msg.get("target")
-                        if target in room.players:
+                        if target in room.players and target != player.id:
                             player.vote = target
-                            await room.broadcast({"type": "vote_progress",
-                                                 "voted": [p.id for p in room.players.values() if p.vote]})
+                            await room.broadcast({
+                                "type": "vote_progress",
+                                "voted": [p.id for p in room.players.values() if p.vote],
+                            })
                             await room.maybe_finish_vote()
 
                 elif mtype == "leave":
@@ -588,7 +746,7 @@ async def ws_endpoint(websocket: WebSocket, room_code: str):
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        traceback.print_exc()
     finally:
         if player is not None:
             async with room.lock:
@@ -603,7 +761,9 @@ async def ws_endpoint(websocket: WebSocket, room_code: str):
             if not room.players or all(not p.connected for p in room.players.values()):
                 async with rooms_lock:
                     t = room.loop_task
-                    if t: t.cancel()
+                    if t:
+                        t.cancel()
                     rooms.pop(room.code, None)
+
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
